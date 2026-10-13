@@ -4,3 +4,5 @@ node_modules/
 .scratch/
 tmp/
 *.tmp
+tsconfig.json
+.claude-plugin/types/

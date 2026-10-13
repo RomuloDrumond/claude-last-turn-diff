@@ -1,0 +1,67 @@
+# last-turn-diff
+
+A Claude Code mod that shows the file edits Claude made in the last turn, and lets you step back through earlier turns. It works in the Claude Desktop app's Code tab and in the terminal. It doesn't use git: it builds diffs from Claude's own Edit, Write and NotebookEdit tool calls.
+
+- **Hint above the prompt.** After a turn that edited files, a line such as `Last turn: 3 files, +40 -12 [View diff]` appears above the prompt. It disappears after a turn that edited nothing.
+- **`/lastturn` pane.** Opens a pane with the newest turn that had edits. The pane shows:
+  - a header with the turn label (`T7 · first words of the prompt…`), the file count and the +/- totals
+  - one row per file with its +/- counts. Click the row to collapse or expand that file.
+  - unified hunks for each open file, with 3 lines of context
+- **Navigation.** `◀ Prev turn` (`p`) and `Next turn ▶` (`n`) step through the turns. `a` expands or collapses every file. A file with many hunks shows them a page at a time, which keeps the pane under the 100,000-character limit for what it can draw.
+
+## How it works
+
+- A `tool.call` hook reads the file before Edit or Write runs, lets the call through unchanged, and then reads the file again. Calls that were denied, failed, or held for review (`staged`) are skipped.
+- Edits are grouped by turn, from `turn.start` to `turn.complete`. Each file's diff compares the file before its first edit in the turn with the file after its last edit in the turn. A small Myers diff in plain TypeScript computes it, with no dependencies.
+- When a session starts, after `/resume`, or after a fork, the mod reads the turns back from the transcript (`$.session.messages()`). It uses the `originalFile` and `content` fields that Edit and Write store there, so the pane survives a reload. `/clear` empties the list.
+- The pane and the hint draw only `Box`, `Text`, `Button` and `Code` (with `format: 'diff'`). Every surface supports these elements, the desktop included.
+
+## Limits
+
+- **Only Edit, Write and NotebookEdit calls are recorded.** The mod doesn't see changes made through the shell (sed, formatters, `git checkout`, code generators), MCP tools, other plugins, or you.
+- **Other changes can mix into the diff.** If something else changes a file between two of Claude's edits to it in the same turn, that change also appears in the file's diff for that turn.
+- **Subagent edits are lost on a reload.** Subagent edits are recorded while the session runs. When the mod reads the turns back from the transcript, it can't see subagent edits, because the main transcript doesn't store them.
+- **Notebook edits are shown per cell.** The diff covers the cell source only, not the notebook JSON.
+- **Size caps:**
+  - Only the 30 newest turns with edits are kept.
+  - A file over 2 MB is listed without a diff.
+  - Each file keeps about 150,000 characters of hunks.
+  - Each turn keeps about 600,000 characters of hunks.
+
+## Load it
+
+You need Claude Code 2.1.286 or later.
+
+**Terminal**, for one session:
+
+```bash
+claude --plugin-dir ~/projects/claude-last-turn-diff
+```
+
+**Claude Desktop (Code tab).** Desktop doesn't accept `--plugin-dir`. Instead, add the folder to `CLAUDE_CODE_PLUGIN_DIRS` under `env` in `~/.claude/settings.json`. Separate several folders with `:`.
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_PLUGIN_DIRS": "/Users/romulodrumond/projects/claude-last-turn-diff"
+  }
+}
+```
+
+Then run `/reload-plugins` or start a new Desktop session, and run `/lastturn`.
+
+## Develop
+
+```bash
+claude plugin validate .
+```
+
+```bash
+claude plugin test .
+```
+
+The tests in `tests/` simulate Edit and Write tool calls and turn boundaries, then read the drawn pane on both the terminal and desktop surfaces.
+
+When the engine loads the mod, it writes `.claude-plugin/types/` and a `tsconfig.json`. After that, `tsc -p .` type-checks the mod. Git ignores both generated files.
+
+This mod borrows the idea of recording edits at `tool.call` and replaying them in a pane from Anthropic's replay-theater sample mod (Apache-2.0). No code is copied from it.
