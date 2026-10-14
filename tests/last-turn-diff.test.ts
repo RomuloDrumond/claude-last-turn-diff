@@ -48,6 +48,7 @@ function world(on: On, options: { messages?: SessionMessage[]; deny?: string } =
   on('session.messages', () => ({ value: options.messages ?? [] }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.toast', () => ({ value: undefined }))
   on('fs.exists', (_$, e) => ({ value: files.has(e.path) }))
   on('fs.read', (_$, e) => {
     const text = files.get(e.path)
@@ -235,6 +236,134 @@ describe('last-turn-diff', () => {
     expect(await shown(ui)).not.toContain('return 42')
     await ui.press({ key: 'toggle-0' })
     expect(await shown(ui)).toContain('return 42')
+  })
+
+  test('Collapse all and Expand all fold every card', async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 1, 'two files', async () => {
+      await editAnswer($)
+      await $.tool.call({ tool: 'Write', file_path: '/work/notes.md', content: '# Notes\n' })
+    })
+
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect((await ui.find({ type: 'Button', key: 'all' }))?.props.label).toBe('Collapse all')
+    await ui.press({ key: 'all' })
+    expect(await shown(ui)).not.toContain('return 42')
+    expect(await shown(ui)).not.toContain('# Notes')
+    expect((await ui.find({ type: 'Button', key: 'all' }))?.props.label).toBe('Expand all')
+    await ui.press({ key: 'all' })
+    expect(await shown(ui)).toContain('return 42')
+    expect(await shown(ui)).toContain('# Notes')
+  })
+
+  test('Unwrap lines cuts long lines instead of wrapping them', async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 1, 'edit', () => editAnswer($))
+
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    const codeWraps = async () =>
+      (await ui.findAll({ type: 'Text', text: /return/ }))
+        .filter(one => one.props.wrap !== undefined)
+        .map(one => one.props.wrap)
+    expect(await codeWraps()).toEqual(['wrap', 'wrap'])
+    await ui.press({ key: 'wrap' })
+    expect(await codeWraps()).toEqual(['truncate-end', 'truncate-end'])
+    expect((await ui.find({ type: 'Button', key: 'wrap' }))?.props.label).toBe('Wrap lines')
+  })
+
+  // The kit has no $.ui.scroll, so the scroll to the card is checked in a session.
+  test('Jump to file opens the file', async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 1, 'two files', async () => {
+      await editAnswer($)
+      await $.tool.call({ tool: 'Write', file_path: '/work/notes.md', content: '# Notes\n' })
+    })
+
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    await ui.press({ key: 'toggle-1' })
+    expect(await shown(ui)).not.toContain('# Notes')
+    await ui.select({ key: 'jump', value: '1' })
+    expect(await shown(ui)).toContain('# Notes')
+  })
+
+  test('a turn too large to draw at once shows one file at a time', async ($, on) => {
+    world(on)
+    await start($)
+    const big = (tag: string) => Array.from({ length: 200 }, (_, i) => `${tag} line ${i + 1}`).join('\n') + '\n'
+    await turn($, 1, 'generate five files', async () => {
+      for (const tag of ['a', 'b', 'c', 'd', 'e']) {
+        await $.tool.call({ tool: 'Write', file_path: `/work/${tag}.txt`, content: big(tag) })
+      }
+    })
+
+    for (const surface of SURFACES) {
+      const ui = await $.ui.mount({ ...PANE, surface })
+      expect(await shown(ui)).toContain("This turn's diff is too large to show at once, so it shows one file at a time")
+      expect(await shown(ui)).toContain('File 1 of 5')
+      expect(await ui.find({ key: 'toggle-0' })).toBeDefined()
+      expect(await ui.find({ key: 'toggle-1' })).toBeUndefined()
+      expect(await ui.find({ key: 'all' })).toBeUndefined()
+      await ui.press({ key: 'next-file' })
+      expect(await shown(ui)).toContain('File 2 of 5')
+      expect(await shown(ui)).toContain('b line 1')
+      expect(await ui.find({ key: 'toggle-0' })).toBeUndefined()
+      await ui.select({ key: 'jump', value: '4' })
+      expect(await shown(ui)).toContain('File 5 of 5')
+      expect(await shown(ui)).toContain('e line 1')
+      await ui.press({ key: 'prev-file' })
+      expect(await shown(ui)).toContain('File 4 of 5')
+      await ui.select({ key: 'jump', value: '0' })
+      await ui.unmount()
+    }
+  })
+
+  test('Refresh adds the turns the transcript holds that were not recorded live', async ($, on) => {
+    const messages: SessionMessage[] = []
+    world(on, { messages })
+    await start($)
+    await turn($, 1, 'first edit', () => editAnswer($))
+    messages.push(
+      { role: 'user', text: 'old prompt', toolUses: [] },
+      {
+        role: 'assistant',
+        text: '',
+        toolUses: [
+          {
+            tool_use_id: 'use-0',
+            tool: 'Write',
+            input: { file_path: '/work/old.md', content: 'old\n' },
+            result: { type: 'create', filePath: '/work/old.md', content: 'old\n', structuredPatch: [] },
+            text: 'ok',
+          },
+        ],
+      },
+      { role: 'user', text: 'first edit', toolUses: [] },
+      {
+        role: 'assistant',
+        text: '',
+        toolUses: [
+          {
+            tool_use_id: 'use-1',
+            tool: 'Edit',
+            input: { file_path: '/work/src/answer.ts', old_string: '  return 1', new_string: '  return 42' },
+            result: { filePath: '/work/src/answer.ts', originalFile: SOURCE, oldString: '  return 1', newString: '  return 42' },
+            text: 'ok',
+          },
+        ],
+      },
+    )
+
+    const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+    expect(await ui.find({ type: 'Select', key: 'turn' })).toBeUndefined()
+    await ui.press({ key: 'refresh' })
+    expect((await ui.find({ type: 'Select', key: 'turn' }))?.props.options).toEqual([
+      { value: '0', label: 'T2 · first edit · 1 file' },
+      { value: '1', label: 'T1 · old prompt · 1 file' },
+    ])
+    expect(await shown(ui)).toContain('T2 · first edit')
   })
 
   test('the turns are read back from the transcript at start', async ($, on) => {

@@ -3,7 +3,8 @@
 // mix; open, it lists the lines with both line numbers, tinted rows for
 // removed and added lines, the changed words marked, and a row for each run
 // of unchanged lines. Unified interleaves the lines; split puts the old file
-// beside the new one.
+// beside the new one. A turn too large to draw at once shows one file at a
+// time, with a warning and Previous/Next file.
 //
 // It draws only Box, Text, Button and, where the surface has it, Select: the
 // desktop, VS Code and mobile have no Raster or Image.
@@ -14,24 +15,27 @@ import type { Elements, EngineInterface, RenderInput } from 'claude-code'
 import type { DiffMode, FileDiff, PaneView, TurnDiff } from '../types'
 import { keepSpaces, rowsOf, splitRowsOf } from './rows'
 import type { Gap, Line, Row, Span, SplitRow } from './rows'
-import { MODE_KEY, NEWEST } from './state'
+import { MODE_KEY, NEWEST, WRAP_KEY } from './state'
 
 type $ = EngineInterface
 type Kit = Pick<Elements['desktop'], 'Box' | 'Text' | 'Button'>
+type Look = { width: number; wrap: boolean }
+
+export type PaneActions = { refresh: () => Promise<void> }
 
 const turns = atom({ plugin: 'last-turn-diff', key: 'turns' } as const, [])
 const view = atom({ plugin: 'last-turn-diff', key: 'view' } as const, NEWEST)
 
+export const PANE = 'last-turn-diff'
 const NBSP = ' '
 // A file shows this many rows a page at a time.
 const PAGE_ROWS = 150
-// Files open by default until their first pages add up to this many rows.
-const OPEN_BY_DEFAULT_ROWS = 250
-// What all open files draw at most: a tree draws its first 100,000
-// characters, and every row is several elements.
-const MAX_DRAWN_CHARS = 85_000
-const MAX_DRAWN_ROWS = 700
-const MAX_LISTED_FILES = 150
+// What every open file draws at most: a tree draws its first 100,000
+// characters, and every row is several elements. A turn whose files do not
+// fit with each one open shows one file at a time.
+const MAX_DRAWN_CHARS = 80_000
+const MAX_DRAWN_ROWS = 600
+const MAX_LISTED_FILES = 60
 const SQUARES = 5
 
 const BACKGROUND = { context: undefined, removed: 'diffRemoved', added: 'diffAdded' } as const
@@ -46,19 +50,6 @@ function pagesOf<T>(rows: readonly T[]): T[][] {
   const pages: T[][] = []
   for (let at = 0; at < rows.length; at += PAGE_ROWS) pages.push(rows.slice(at, at + PAGE_ROWS))
   return pages
-}
-
-function opensByDefault(files: readonly FileDiff[]): Set<string> {
-  const open = new Set<string>()
-  let rows = 0
-  for (const file of files) {
-    const count = Math.min(PAGE_ROWS, rowsOf(file.hunks).length)
-    if (count === 0) continue
-    if (open.size > 0 && rows + count > OPEN_BY_DEFAULT_ROWS) break
-    open.add(file.key)
-    rows += count
-  }
-  return open
 }
 
 function widthOf(rows: readonly Row[]): number {
@@ -79,63 +70,6 @@ function squaresOf(file: FileDiff): { added: number; removed: number; none: numb
   return { added, removed: filled - added, none: SQUARES - filled }
 }
 
-function spansOf(ui: Kit, line: Line) {
-  const word = WORD[line.kind]
-  const spans = line.spans.map((span: Span) => ({ ...span, text: keepSpaces(span.text) }))
-  if (spans.every(span => span.text === '')) return NBSP
-  return spans.map(span =>
-    span.isChanged && word !== undefined ? <ui.Text backgroundColor={word}>{span.text}</ui.Text> : span.text,
-  )
-}
-
-function gapRow(ui: Kit, gap: Gap, width: number) {
-  const where = gap.count === 1 ? `line ${gap.from}` : `lines ${gap.from}–${gap.from + gap.count - 1}`
-  return (
-    <ui.Box flexDirection="row">
-      <ui.Text dimColor wrap="truncate-end">
-        {NBSP.repeat(width)} ⋯ {plural(gap.count, 'unchanged line')} ({where})
-      </ui.Text>
-    </ui.Box>
-  )
-}
-
-function unifiedRow(ui: Kit, row: Row, width: number) {
-  if (row.kind === 'gap') return gapRow(ui, row, width)
-  return (
-    <ui.Box flexDirection="row" backgroundColor={BACKGROUND[row.kind]}>
-      <ui.Text dimColor>{gutter(row.old, width)}</ui.Text>
-      <ui.Text dimColor>{gutter(row.new, width)}</ui.Text>
-      <ui.Text dimColor={row.kind === 'context'}>{MARK[row.kind]}{NBSP}</ui.Text>
-      <ui.Box flexGrow={1} flexShrink={1}>
-        <ui.Text>{spansOf(ui, row)}</ui.Text>
-      </ui.Box>
-    </ui.Box>
-  )
-}
-
-function half(ui: Kit, line: Line | undefined, side: 'old' | 'new', width: number) {
-  if (line === undefined) return <ui.Box width="50%" />
-  return (
-    <ui.Box width="50%" flexDirection="row" backgroundColor={BACKGROUND[line.kind]}>
-      <ui.Text dimColor>{gutter(line[side], width)}</ui.Text>
-      <ui.Text dimColor={line.kind === 'context'}>{MARK[line.kind]}{NBSP}</ui.Text>
-      <ui.Box flexGrow={1} flexShrink={1}>
-        <ui.Text>{spansOf(ui, line)}</ui.Text>
-      </ui.Box>
-    </ui.Box>
-  )
-}
-
-function splitRow(ui: Kit, row: SplitRow, width: number) {
-  if (row.kind === 'gap') return gapRow(ui, row, width)
-  return (
-    <ui.Box flexDirection="row" gap={1}>
-      {half(ui, row.left, 'old', width)}
-      {half(ui, row.right, 'new', width)}
-    </ui.Box>
-  )
-}
-
 function charsOf(rows: readonly (Row | SplitRow)[], width: number): number {
   const lineChars = (line: Line | undefined) =>
     line === undefined ? 0 : 2 * width + 6 + line.spans.reduce((sum, span) => sum + span.text.length, 0)
@@ -146,7 +80,84 @@ function charsOf(rows: readonly (Row | SplitRow)[], width: number): number {
   }, 0)
 }
 
-export async function paneOf($: $, e: RenderInput<'Pane'>) {
+function code(ui: Kit, line: Line, look: Look) {
+  const word = WORD[line.kind]
+  const spans = line.spans.map((span: Span) => ({ ...span, text: keepSpaces(span.text) }))
+  const shown = spans.every(span => span.text === '')
+    ? NBSP
+    : spans.map(span =>
+        span.isChanged && word !== undefined ? <ui.Text backgroundColor={word}>{span.text}</ui.Text> : span.text,
+      )
+  return (
+    <ui.Box flexGrow={1} flexShrink={1}>
+      <ui.Text wrap={look.wrap ? 'wrap' : 'truncate-end'}>{shown}</ui.Text>
+    </ui.Box>
+  )
+}
+
+function gapRow(ui: Kit, gap: Gap, look: Look) {
+  const where = gap.count === 1 ? `line ${gap.from}` : `lines ${gap.from}–${gap.from + gap.count - 1}`
+  return (
+    <ui.Box flexDirection="row">
+      <ui.Text dimColor wrap="truncate-end">
+        {NBSP.repeat(look.width)} ⋯ {plural(gap.count, 'unchanged line')} ({where})
+      </ui.Text>
+    </ui.Box>
+  )
+}
+
+function unifiedRow(ui: Kit, row: Row, look: Look) {
+  if (row.kind === 'gap') return gapRow(ui, row, look)
+  return (
+    <ui.Box flexDirection="row" backgroundColor={BACKGROUND[row.kind]}>
+      <ui.Text dimColor>{gutter(row.old, look.width)}</ui.Text>
+      <ui.Text dimColor>{gutter(row.new, look.width)}</ui.Text>
+      <ui.Text dimColor={row.kind === 'context'}>{MARK[row.kind]}{NBSP}</ui.Text>
+      {code(ui, row, look)}
+    </ui.Box>
+  )
+}
+
+function half(ui: Kit, line: Line | undefined, side: 'old' | 'new', look: Look) {
+  if (line === undefined) return <ui.Box width="50%" />
+  return (
+    <ui.Box width="50%" flexDirection="row" backgroundColor={BACKGROUND[line.kind]}>
+      <ui.Text dimColor>{gutter(line[side], look.width)}</ui.Text>
+      <ui.Text dimColor={line.kind === 'context'}>{MARK[line.kind]}{NBSP}</ui.Text>
+      {code(ui, line, look)}
+    </ui.Box>
+  )
+}
+
+function splitRow(ui: Kit, row: SplitRow, look: Look) {
+  if (row.kind === 'gap') return gapRow(ui, row, look)
+  return (
+    <ui.Box flexDirection="row" gap={1}>
+      {half(ui, row.left, 'old', look)}
+      {half(ui, row.right, 'new', look)}
+    </ui.Box>
+  )
+}
+
+// One file's rows in the pane's mode, paged, with what its first page costs.
+function prepare(file: FileDiff, mode: DiffMode) {
+  const unified = rowsOf(file.hunks)
+  const rows: (Row | SplitRow)[] = mode === 'split' ? splitRowsOf(unified) : unified
+  const width = widthOf(unified)
+  const pages = pagesOf(rows)
+  const first = pages[0] ?? []
+  return { file, rows, width, pages, firstRows: first.length, firstChars: charsOf(first, width) }
+}
+
+async function remember($: $, key: string, value: unknown) {
+  try {
+    await $.store.set(key, value)
+  } catch {
+    // Remembering a choice is a convenience: the pane changed anyway.
+  }
+}
+
+export async function paneOf($: $, e: RenderInput<'Pane'>, actions: PaneActions) {
   const elements = $.ui.resolve(e)
   const { Box, Text, Button } = elements
   const Select = 'Select' in elements ? elements.Select : undefined
@@ -155,19 +166,42 @@ export async function paneOf($: $, e: RenderInput<'Pane'>) {
   const now: PaneView = await read($, view)
   const at = Math.min(now.at, Math.max(0, list.length - 1))
   const mode: DiffMode = now.mode ?? 'unified'
+  const wrap = now.wrap ?? true
   const turn: TurnDiff | undefined = list[at]
+
+  const refreshButton = (
+    <Button key="refresh" label="⟳ Refresh" hotkey="r" onPress={() => void actions.refresh()} />
+  )
 
   if (turn === undefined) {
     return (
-      <Box flexDirection="column">
-        <Text dimColor>No file edits recorded in this session yet.</Text>
-        <Text dimColor>Edits made through Edit, Write and NotebookEdit show here after each turn.</Text>
+      <Box flexDirection="column" gap={1}>
+        <Box flexDirection="column">
+          <Text dimColor>No file edits recorded in this session yet.</Text>
+          <Text dimColor>Edits made through Edit, Write and NotebookEdit show here after each turn.</Text>
+        </Box>
+        <Box flexDirection="row">{refreshButton}</Box>
       </Box>
     )
   }
 
+  const files = turn.files.map(file => prepare(file, mode))
+  const isTooLarge =
+    files.length > MAX_LISTED_FILES ||
+    files.reduce((sum, one) => sum + one.firstRows, 0) > MAX_DRAWN_ROWS ||
+    files.reduce((sum, one) => sum + one.firstChars, 0) > MAX_DRAWN_CHARS
+  const current = Math.min(now.file ?? 0, files.length - 1)
+  const isOpen = (file: FileDiff) => !now.toggled.includes(file.key)
+  const isAllOpen = turn.files.every(isOpen)
+
   const go = (to: number) =>
-    update($, view, was => ({ ...was, at: Math.max(0, Math.min(to, list.length - 1)), toggled: [], pages: {} }))
+    update($, view, was => ({
+      ...was,
+      at: Math.max(0, Math.min(to, list.length - 1)),
+      toggled: [],
+      pages: {},
+      file: 0,
+    }))
   const toggle = (key: string) =>
     update($, view, was => ({
       ...was,
@@ -178,26 +212,36 @@ export async function paneOf($: $, e: RenderInput<'Pane'>) {
   const switchMode = async () => {
     const next: DiffMode = mode === 'unified' ? 'split' : 'unified'
     await update($, view, was => ({ ...was, mode: next, pages: {} }))
+    await remember($, MODE_KEY, next)
+  }
+  const switchWrap = async () => {
+    await update($, view, was => ({ ...was, wrap: !wrap }))
+    await remember($, WRAP_KEY, !wrap)
+  }
+  const showFile = (to: number) =>
+    update($, view, was => ({ ...was, file: Math.max(0, Math.min(to, files.length - 1)) }))
+  const jumpTo = async (index: number) => {
+    const target = turn.files[index]
+    if (target === undefined) return
+    await update($, view, was => ({
+      ...was,
+      file: index,
+      toggled: was.toggled.filter(key => key !== target.key),
+    }))
+    if (isTooLarge) return
     try {
-      await $.store.set(MODE_KEY, next)
+      await $.ui.scroll({ to: { key: `card-${index}` }, in: PANE, block: 'start' })
     } catch {
-      // Remembering the choice is a convenience: the pane switched anyway.
+      // The surface could not scroll: the file is open, further down.
     }
   }
 
-  const listed = turn.files.slice(0, MAX_LISTED_FILES)
-  const byDefault = opensByDefault(listed)
-  const isOpen = (file: FileDiff) => byDefault.has(file.key) !== now.toggled.includes(file.key)
-  const isAllOpen = listed.every(isOpen)
-  let chars = MAX_DRAWN_CHARS - 4_000
+  let chars = MAX_DRAWN_CHARS
   let drawnRows = MAX_DRAWN_ROWS
 
-  const cards = listed.map((file, index) => {
-    const open = isOpen(file)
-    const unified = rowsOf(file.hunks)
-    const rows: (Row | SplitRow)[] = mode === 'split' ? splitRowsOf(unified) : unified
-    const width = widthOf(unified)
-    const pages = pagesOf(rows)
+  const card = (index: number) => {
+    const { file, rows, width, pages } = files[index]!
+    const open = isTooLarge || isOpen(file)
     const page = Math.min(now.pages[file.key] ?? 0, Math.max(0, pages.length - 1))
     const shown = pages[page] ?? []
     const size = charsOf(shown, width)
@@ -206,12 +250,13 @@ export async function paneOf($: $, e: RenderInput<'Pane'>) {
       chars -= size
       drawnRows -= shown.length
     }
+    const look: Look = { width, wrap }
     const squares = squaresOf(file)
     const badge = file.isNew ? 'Added' : 'Modified'
 
     return (
       <Box key={`card-${index}`} flexDirection="column" borderStyle="round" borderDimColor>
-        <Button key={`toggle-${index}`} plain onPress={() => void toggle(file.key)}>
+        <Button key={`toggle-${index}`} plain onPress={() => void (isTooLarge ? undefined : toggle(file.key))}>
           {open ? '▾ ' : '▸ '}
           <Text bold>{file.name}</Text>
           {'  '}
@@ -225,7 +270,9 @@ export async function paneOf($: $, e: RenderInput<'Pane'>) {
         </Button>
         {open && shown.length > 0 && fits && (
           <Box flexDirection="column">
-            {shown.map(row => (mode === 'split' ? splitRow(ui, row as SplitRow, width) : unifiedRow(ui, row as Row, width)))}
+            {shown.map(row =>
+              mode === 'split' ? splitRow(ui, row as SplitRow, look) : unifiedRow(ui, row as Row, look),
+            )}
           </Box>
         )}
         {open && shown.length > 0 && !fits && (
@@ -243,7 +290,21 @@ export async function paneOf($: $, e: RenderInput<'Pane'>) {
         )}
       </Box>
     )
-  })
+  }
+
+  const jump =
+    Select !== undefined ? (
+      <Select
+        key="jump"
+        label="Jump to file"
+        value={String(current)}
+        options={turn.files.map((file, index) => ({
+          value: String(index),
+          label: `${file.name}  +${file.added} −${file.removed}`,
+        }))}
+        onSelect={value => void jumpTo(Number(value))}
+      />
+    ) : null
 
   return (
     <Box flexDirection="column" gap={1}>
@@ -259,44 +320,68 @@ export async function paneOf($: $, e: RenderInput<'Pane'>) {
           </Text>
         </Text>
       </Box>
-      <Box flexDirection="row" gap={1} flexWrap="wrap">
-        <Button key="prev" label="◀ Older" hotkey="p" onPress={() => void go(at + 1)} />
-        {Select !== undefined && list.length > 1 && (
-          <Select
-            key="turn"
-            value={String(at)}
-            options={list.map((one, index) => ({
-              value: String(index),
-              label: `T${one.n} · ${one.title} · ${plural(one.files.length, 'file')}`,
-            }))}
-            onSelect={value => void go(Number(value))}
+      <Box flexDirection="column">
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
+          <Button key="prev" label="◀ Older" hotkey="p" onPress={() => void go(at + 1)} />
+          {Select !== undefined && list.length > 1 && (
+            <Select
+              key="turn"
+              value={String(at)}
+              options={list.map((one, index) => ({
+                value: String(index),
+                label: `T${one.n} · ${one.title} · ${plural(one.files.length, 'file')}`,
+              }))}
+              onSelect={value => void go(Number(value))}
+            />
+          )}
+          <Button key="next" label="Newer ▶" hotkey="n" onPress={() => void go(at - 1)} />
+          {refreshButton}
+        </Box>
+        <Box flexDirection="row" gap={1} flexWrap="wrap">
+          <Button
+            key="mode"
+            label={mode === 'unified' ? 'Split view' : 'Unified view'}
+            hotkey="s"
+            onPress={() => void switchMode()}
           />
-        )}
-        <Button key="next" label="Newer ▶" hotkey="n" onPress={() => void go(at - 1)} />
-        <Button
-          key="mode"
-          label={mode === 'unified' ? 'Split view' : 'Unified view'}
-          hotkey="s"
-          onPress={() => void switchMode()}
-        />
-        <Button
-          key="all"
-          label={isAllOpen ? 'Collapse all' : 'Expand all'}
-          hotkey="a"
-          onPress={() =>
-            void update($, view, was => ({
-              ...was,
-              toggled: listed
-                .filter(file => (isAllOpen ? byDefault.has(file.key) : !byDefault.has(file.key)))
-                .map(file => file.key),
-            }))
-          }
-        />
+          <Button
+            key="wrap"
+            label={wrap ? 'Unwrap lines' : 'Wrap lines'}
+            hotkey="w"
+            onPress={() => void switchWrap()}
+          />
+          {!isTooLarge && (
+            <Button
+              key="all"
+              label={isAllOpen ? 'Collapse all' : 'Expand all'}
+              hotkey="a"
+              onPress={() =>
+                void update($, view, was => ({
+                  ...was,
+                  toggled: isAllOpen ? turn.files.map(file => file.key) : [],
+                }))
+              }
+            />
+          )}
+          {jump}
+        </Box>
       </Box>
-      <Box flexDirection="column">{cards}</Box>
-      {turn.files.length > listed.length && (
-        <Text dimColor>{turn.files.length - listed.length} more files not listed.</Text>
+      {isTooLarge && (
+        <Box flexDirection="column">
+          <Text color="warning">
+            ⚠ This turn's diff is too large to show at once, so it shows one file at a time. Use Previous and
+            Next file{Select !== undefined ? ' or Jump to file' : ''} to move between files.
+          </Text>
+          <Box flexDirection="row" gap={1}>
+            <Button key="prev-file" label="◀ Previous file" hotkey="k" onPress={() => void showFile(current - 1)} />
+            <Text dimColor>
+              File {current + 1} of {files.length}
+            </Text>
+            <Button key="next-file" label="Next file ▶" hotkey="j" onPress={() => void showFile(current + 1)} />
+          </Box>
+        </Box>
       )}
+      <Box flexDirection="column">{isTooLarge ? card(current) : files.map((_, index) => card(index))}</Box>
     </Box>
   )
 }

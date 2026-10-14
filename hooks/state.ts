@@ -5,5 +5,7 @@ import type { PaneView } from '../types'
 
 export const NEWEST: PaneView = { at: 0, toggled: [], pages: {} }
 
-// The $.store key holding the person's unified or split choice.
+// The $.store keys holding the person's unified or split choice and whether
+// long lines wrap.
 export const MODE_KEY = 'mode'
+export const WRAP_KEY = 'wrap'

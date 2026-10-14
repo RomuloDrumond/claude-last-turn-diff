@@ -32,12 +32,16 @@ export type TurnDiff = {
 export type PaneView = {
   // Which turn, as an index into `turns` (0 the newest).
   at: number
-  // Files whose expansion was flipped from the default, by key.
+  // Collapsed files, by key (every file starts open).
   toggled: string[]
   // Each file's page of rows, by key; 0 when absent.
   pages: Record<string, number>
   // Lines interleaved (unified) or old beside new (split); unified when absent.
   mode?: DiffMode
+  // Whether long lines wrap; they do when absent.
+  wrap?: boolean
+  // The file shown or last jumped to, as an index into the turn's files.
+  file?: number
 }
 
 export type DiffMode = 'unified' | 'split'

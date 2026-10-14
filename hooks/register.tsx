@@ -9,12 +9,11 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ResultOf } from 'claude-code'
 
 import type { BandHint, DiffMode, TurnDiff } from '../types'
-import { MODE_KEY, NEWEST } from './state'
+import { MODE_KEY, NEWEST, WRAP_KEY } from './state'
 import { EDIT_TOOLS, MAX_TEXT_CHARS, stepOf, turnOf, turnsFromMessages } from './turns'
 import type { Step } from './turns'
-import { paneOf, plural } from './view'
+import { PANE, paneOf, plural } from './view'
 
-const PANE = 'last-turn-diff'
 const TITLE = 'Last turn diff'
 // How many turns with edits are kept.
 const KEEP_TURNS = 30
@@ -44,28 +43,69 @@ async function readText($: $, path: string): Promise<string | null | undefined> 
   }
 }
 
-// Back to the newest turn, keeping the unified or split choice.
-const toNewest = ($: $) => update($, view, was => ({ ...NEWEST, ...(was.mode ? { mode: was.mode } : {}) }))
+// Back to the newest turn, keeping the person's display choices.
+const toNewest = ($: $) =>
+  update($, view, was => ({
+    ...NEWEST,
+    ...(was.mode !== undefined ? { mode: was.mode } : {}),
+    ...(was.wrap !== undefined ? { wrap: was.wrap } : {}),
+  }))
 
 async function openPane($: $) {
   await toNewest($)
   return $.ui.open({ id: PANE, title: TITLE, focus: true })
 }
 
+async function fromTranscript($: $) {
+  try {
+    return turnsFromMessages(await $.session.messages(), await cwdOf($), KEEP_TURNS)
+  } catch {
+    return undefined
+  }
+}
+
 // Rebuilds the turns from the transcript: after a reload, /resume or a fork.
 async function rebuild($: $) {
-  let messages: Awaited<ReturnType<$['session']['messages']>> = []
-  try {
-    messages = await $.session.messages()
-  } catch {
-    return
-  }
-  const { turns: found, count } = turnsFromMessages(messages, await cwdOf($), KEEP_TURNS)
+  const transcript = await fromTranscript($)
+  if (transcript === undefined) return
+  const { turns: found, count } = transcript
   await update($, turns, () => found)
   await update($, turnNo, () => count)
   await toNewest($)
   const newest = found[0]
   await update($, band, () => (newest !== undefined && newest.n === count ? hintOf(newest) : null))
+}
+
+const sameTurn = (a: TurnDiff, b: TurnDiff) =>
+  a.title === b.title && a.files.map(file => file.key).join('\n') === b.files.map(file => file.key).join('\n')
+
+// The pane's Refresh: reads the transcript again and adds the turns it holds
+// that were not recorded live (before the mod loaded, or lost to a reload).
+// A turn recorded live is kept as recorded: it has its subagents' edits too.
+async function refresh($: $) {
+  const transcript = await fromTranscript($)
+  if (transcript === undefined) return
+  const live = await read($, turns)
+  const shown = live[(await read($, view)).at]
+  const matched = new Set<TurnDiff>()
+  const found = transcript.turns.map(turn => {
+    const free = live.filter(one => !matched.has(one) && sameTurn(one, turn))
+    const hit = free.find(one => one.n === turn.n) ?? free[0]
+    if (hit === undefined) return turn
+    matched.add(hit)
+    return { ...hit, n: turn.n }
+  })
+  const onlyLive = live.filter(one => !matched.has(one))
+  const merged = [...found, ...onlyLive].sort((a, b) => b.n - a.n).slice(0, KEEP_TURNS)
+  await update($, turns, () => merged)
+  await update($, turnNo, count => Math.max(count, transcript.count))
+  const at = shown === undefined ? 0 : Math.max(0, merged.findIndex(turn => turn.n === shown.n && turn.title === shown.title))
+  await update($, view, was => ({ ...was, at }))
+  try {
+    $.ui.toast(`Refreshed: ${plural(merged.length, 'turn')} with edits`)
+  } catch {
+    // The redraw shows it.
+  }
 }
 
 async function reset($: $) {
@@ -75,15 +115,18 @@ async function reset($: $) {
   await update($, band, () => null)
 }
 
-async function restoreMode($: $) {
+// The person's unified or split and wrap choices, kept across sessions.
+async function restoreChoices($: $) {
   try {
     const kept = await $.store.get(MODE_KEY)
     if (kept === 'unified' || kept === 'split') {
       const mode: DiffMode = kept
       await update($, view, was => ({ ...was, mode }))
     }
+    const wrap = await $.store.get(WRAP_KEY)
+    if (typeof wrap === 'boolean') await update($, view, was => ({ ...was, wrap }))
   } catch {
-    // No store here: the pane opens unified.
+    // No store here: the pane opens unified, lines wrapped.
   }
 }
 
@@ -109,7 +152,7 @@ export const register: Register = on => {
       description: 'Show the file edits Claude made in the last turn, with earlier turns a step away',
       immediate: true,
     })
-    await restoreMode($)
+    await restoreChoices($)
     // A hot reload keeps $.state: only an empty session reads the transcript.
     if ((await read($, turns)).length === 0 && (await read($, turnNo)) === 0) await rebuild($)
     return started
@@ -205,5 +248,5 @@ export const register: Register = on => {
     )
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => paneOf($, e))
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => paneOf($, e, { refresh: () => refresh($) }))
 }
