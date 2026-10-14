@@ -71,6 +71,12 @@ claude plugin validate .
 claude plugin test .
 ```
 
+Desktop runs its own bundled Claude Code, which can be older than the `claude` on your PATH. Validate with that build too, because an older engine can refuse a module a newer one loads (2.1.295 refuses passing `$` into a function imported from another file, which is why `hooks/view.tsx` never holds `$`). In a Desktop session, `$CLAUDE_CODE_EXECPATH` names that build:
+
+```bash
+"$CLAUDE_CODE_EXECPATH" plugin validate .
+```
+
 The tests in `tests/` simulate Edit and Write tool calls and turn boundaries, then read the drawn pane (rows, tints, word marks, split view, wrap, collapse all, jump to file, the large-turn mode, refresh, turn picker) on both the terminal and desktop surfaces.
 
 When the engine loads the mod, it writes `.claude-plugin/types/` and a `tsconfig.json`. After that, `tsc -p .` type-checks the mod. Git ignores both generated files.

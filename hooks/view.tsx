@@ -8,23 +8,34 @@
 //
 // It draws only Box, Text, Button and, where the surface has it, Select: the
 // desktop, VS Code and mobile have no Raster or Image.
+//
+// It never holds `$`: the hooks module reads the state, resolves the
+// elements and hands in what the buttons do, since an engine before 2.1.300
+// refuses a module that passes `$` into a function of another file.
 
-import { atom, read, update } from 'claude-code'
-import type { Elements, EngineInterface, RenderInput } from 'claude-code'
+import type { Elements, RenderSurface } from 'claude-code'
 
 import type { DiffMode, FileDiff, PaneView, TurnDiff } from '../types'
 import { keepSpaces, rowsOf, splitRowsOf } from './rows'
 import type { Gap, Line, Row, Span, SplitRow } from './rows'
-import { MODE_KEY, NEWEST, WRAP_KEY } from './state'
+import { MODE_KEY, WRAP_KEY } from './state'
 
-type $ = EngineInterface
 type Kit = Pick<Elements['desktop'], 'Box' | 'Text' | 'Button'>
 type Look = { width: number; wrap: boolean }
 
-export type PaneActions = { refresh: () => Promise<void> }
+// What the pane's controls do, done by the hooks module, which holds `$`.
+export type PaneActions = {
+  // Writes the pane's view: `change` gets it as stored and returns the next.
+  change: (change: (was: PaneView) => PaneView) => Promise<unknown>
+  // Keeps a display choice across sessions.
+  remember: (key: string, value: boolean | string) => Promise<void>
+  // Scrolls the pane to one of its keyed elements.
+  scrollTo: (key: string) => Promise<void>
+  refresh: () => Promise<void>
+}
 
-const turns = atom({ plugin: 'last-turn-diff', key: 'turns' } as const, [])
-const view = atom({ plugin: 'last-turn-diff', key: 'view' } as const, NEWEST)
+// What the pane draws from: the turns, newest first, and where it stands.
+export type PaneModel = { list: readonly TurnDiff[]; now: PaneView }
 
 export const PANE = 'last-turn-diff'
 const NBSP = ' '
@@ -152,21 +163,10 @@ function prepare(file: FileDiff, mode: DiffMode) {
   return { file, rows, isSplit, width, pages, firstChars: charsOf(first, width) }
 }
 
-async function remember($: $, key: string, value: unknown) {
-  try {
-    await $.store.set(key, value)
-  } catch {
-    // Remembering a choice is a convenience: the pane changed anyway.
-  }
-}
-
-export async function paneOf($: $, e: RenderInput<'Pane'>, actions: PaneActions) {
-  const elements = $.ui.resolve(e)
+export function paneTree(elements: Elements[RenderSurface], { list, now }: PaneModel, actions: PaneActions) {
   const { Box, Text, Button } = elements
   const Select = 'Select' in elements ? elements.Select : undefined
   const ui: Kit = { Box, Text, Button }
-  const list = await read($, turns)
-  const now: PaneView = await read($, view)
   const at = Math.min(now.at, Math.max(0, list.length - 1))
   const mode: DiffMode = now.mode ?? 'unified'
   const wrap = now.wrap ?? true
@@ -199,7 +199,7 @@ export async function paneOf($: $, e: RenderInput<'Pane'>, actions: PaneActions)
   const isAllOpen = turn.files.every(isOpen)
 
   const go = (to: number) =>
-    update($, view, was => ({
+    actions.change(was => ({
       ...was,
       at: Math.max(0, Math.min(to, list.length - 1)),
       toggled: [],
@@ -207,37 +207,32 @@ export async function paneOf($: $, e: RenderInput<'Pane'>, actions: PaneActions)
       file: 0,
     }))
   const toggle = (key: string) =>
-    update($, view, was => ({
+    actions.change(was => ({
       ...was,
       toggled: was.toggled.includes(key) ? was.toggled.filter(one => one !== key) : [...was.toggled, key],
     }))
   const turnPage = (key: string, to: number) =>
-    update($, view, was => ({ ...was, pages: { ...was.pages, [key]: to } }))
+    actions.change(was => ({ ...was, pages: { ...was.pages, [key]: to } }))
   const switchMode = async () => {
     const next: DiffMode = mode === 'unified' ? 'split' : 'unified'
-    await update($, view, was => ({ ...was, mode: next, pages: {} }))
-    await remember($, MODE_KEY, next)
+    await actions.change(was => ({ ...was, mode: next, pages: {} }))
+    await actions.remember(MODE_KEY, next)
   }
   const switchWrap = async () => {
-    await update($, view, was => ({ ...was, wrap: !wrap }))
-    await remember($, WRAP_KEY, !wrap)
+    await actions.change(was => ({ ...was, wrap: !wrap }))
+    await actions.remember(WRAP_KEY, !wrap)
   }
   const showFile = (to: number) =>
-    update($, view, was => ({ ...was, file: Math.max(0, Math.min(to, files.length - 1)) }))
+    actions.change(was => ({ ...was, file: Math.max(0, Math.min(to, files.length - 1)) }))
   const jumpTo = async (index: number) => {
     const target = turn.files[index]
     if (target === undefined) return
-    await update($, view, was => ({
+    await actions.change(was => ({
       ...was,
       file: index,
       toggled: was.toggled.filter(key => key !== target.key),
     }))
-    if (isTooLarge) return
-    try {
-      await $.ui.scroll({ to: { key: `card-${index}` }, in: PANE, block: 'start' })
-    } catch {
-      // The surface could not scroll: the file is open, further down.
-    }
+    if (!isTooLarge) await actions.scrollTo(`card-${index}`)
   }
 
   let chars = MAX_DRAWN_CHARS
@@ -360,7 +355,7 @@ export async function paneOf($: $, e: RenderInput<'Pane'>, actions: PaneActions)
               label={isAllOpen ? 'Collapse all' : 'Expand all'}
               hotkey="a"
               onPress={() =>
-                void update($, view, was => ({
+                void actions.change(was => ({
                   ...was,
                   toggled: isAllOpen ? turn.files.map(file => file.key) : [],
                 }))

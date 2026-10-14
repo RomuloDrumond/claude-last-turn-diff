@@ -12,7 +12,8 @@ import type { BandHint, DiffMode, TurnDiff } from '../types'
 import { MODE_KEY, NEWEST, WRAP_KEY } from './state'
 import { EDIT_TOOLS, MAX_TEXT_CHARS, stepOf, turnOf, turnsFromMessages } from './turns'
 import type { Step } from './turns'
-import { PANE, paneOf, plural } from './view'
+import { PANE, paneTree, plural } from './view'
+import type { PaneActions } from './view'
 
 const TITLE = 'Last turn diff'
 // How many turns with edits are kept.
@@ -248,5 +249,26 @@ export const register: Register = on => {
     )
   })
 
-  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => paneOf($, e, { refresh: () => refresh($) }))
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const actions: PaneActions = {
+      change: change => update($, view, change),
+      remember: async (key, value) => {
+        try {
+          await $.store.set(key, value)
+        } catch {
+          // Remembering a choice is a convenience: the pane changed anyway.
+        }
+      },
+      scrollTo: async key => {
+        try {
+          await $.ui.scroll({ to: { key }, in: PANE, block: 'start' })
+        } catch {
+          // The surface could not scroll: the file is open, further down.
+        }
+      },
+      refresh: () => refresh($),
+    }
+    const model = { list: await read($, turns), now: await read($, view) }
+    return paneTree($.ui.resolve(e), model, actions)
+  })
 }
