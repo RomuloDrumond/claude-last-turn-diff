@@ -8,8 +8,15 @@ A Claude Code mod that shows the file edits Claude made in the last turn, and le
   - one card per file with its path, an Added or Modified badge, the +/− counts and five green/red squares for their mix. Click a card to collapse or expand it.
   - the lines of each open file with the old and new line numbers, red and green rows for removed and added lines, and the words that changed within a reworded line marked
   - a `⋯ 23 unchanged lines (lines 12–34)` row wherever unchanged lines are skipped
-- **Unified or split.** `Split view` (`s`) puts the old file beside the new one, as GitHub's split diff does; `Unified view` interleaves them. The choice is remembered across sessions.
-- **Navigation.** `◀ Older` (`p`), `Newer ▶` (`n`) and a turn picker step through the turns. `a` expands or collapses every file. A long file shows 150 lines at a time, which keeps the pane under the 100,000-character limit for what it can draw.
+- **Toolbar:**
+  - `◀ Older` (`p`), `Newer ▶` (`n`) and a turn picker step through the turns.
+  - `⟳ Refresh` (`r`) reads the transcript again and adds any turn with edits that wasn't recorded live, for example from before the mod loaded. Turns recorded live are kept as recorded.
+  - `Split view` / `Unified view` (`s`) puts the old file beside the new one, as GitHub's split diff does, or interleaves them. New files always show unified.
+  - `Unwrap lines` / `Wrap lines` (`w`) cuts long lines at the pane's edge or wraps them.
+  - `Collapse all` / `Expand all` (`a`) folds every card.
+  - `Jump to file` opens a file and scrolls to its card.
+  - The split and wrap choices are remembered across sessions.
+- **Large turns.** When a turn changes several files that add up to more than 400 lines, the pane warns that the diff is too large to show at once and shows one file at a time, with `◀ Previous file` (`k`), `Next file ▶` (`j`) and `Jump to file`. A long file shows 150 lines at a time either way, which keeps the pane under the 100,000-character limit for what it can draw.
 
 The colors come from the theme keys Claude Code uses for its own diffs (`diffAdded`, `diffRemoved`, `diffAddedWord`, `diffRemovedWord`), so they follow the light or dark theme.
 
@@ -64,7 +71,7 @@ claude plugin validate .
 claude plugin test .
 ```
 
-The tests in `tests/` simulate Edit and Write tool calls and turn boundaries, then read the drawn pane (rows, tints, word marks, split view, turn picker) on both the terminal and desktop surfaces.
+The tests in `tests/` simulate Edit and Write tool calls and turn boundaries, then read the drawn pane (rows, tints, word marks, split view, wrap, collapse all, jump to file, the large-turn mode, refresh, turn picker) on both the terminal and desktop surfaces.
 
 When the engine loads the mod, it writes `.claude-plugin/types/` and a `tsconfig.json`. After that, `tsc -p .` type-checks the mod. Git ignores both generated files.
 
