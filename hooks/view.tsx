@@ -31,10 +31,11 @@ const NBSP = ' '
 // A file shows this many rows a page at a time.
 const PAGE_ROWS = 150
 // What every open file draws at most: a tree draws its first 100,000
-// characters, and every row is several elements. A turn whose files do not
-// fit with each one open shows one file at a time.
+// characters, and every row is several elements.
 const MAX_DRAWN_CHARS = 80_000
 const MAX_DRAWN_ROWS = 600
+// A turn of several files past either of these shows one file at a time.
+const MAX_TURN_ROWS = 400
 const MAX_LISTED_FILES = 60
 const SQUARES = 5
 
@@ -140,13 +141,15 @@ function splitRow(ui: Kit, row: SplitRow, look: Look) {
 }
 
 // One file's rows in the pane's mode, paged, with what its first page costs.
+// A new file is all additions: split would leave its old side empty.
 function prepare(file: FileDiff, mode: DiffMode) {
   const unified = rowsOf(file.hunks)
-  const rows: (Row | SplitRow)[] = mode === 'split' ? splitRowsOf(unified) : unified
+  const isSplit = mode === 'split' && !file.isNew
+  const rows: (Row | SplitRow)[] = isSplit ? splitRowsOf(unified) : unified
   const width = widthOf(unified)
   const pages = pagesOf(rows)
   const first = pages[0] ?? []
-  return { file, rows, width, pages, firstRows: first.length, firstChars: charsOf(first, width) }
+  return { file, rows, isSplit, width, pages, firstChars: charsOf(first, width) }
 }
 
 async function remember($: $, key: string, value: unknown) {
@@ -187,9 +190,10 @@ export async function paneOf($: $, e: RenderInput<'Pane'>, actions: PaneActions)
 
   const files = turn.files.map(file => prepare(file, mode))
   const isTooLarge =
-    files.length > MAX_LISTED_FILES ||
-    files.reduce((sum, one) => sum + one.firstRows, 0) > MAX_DRAWN_ROWS ||
-    files.reduce((sum, one) => sum + one.firstChars, 0) > MAX_DRAWN_CHARS
+    files.length > 1 &&
+    (files.length > MAX_LISTED_FILES ||
+      files.reduce((sum, one) => sum + lineCount(one.rows), 0) > MAX_TURN_ROWS ||
+      files.reduce((sum, one) => sum + one.firstChars, 0) > MAX_DRAWN_CHARS)
   const current = Math.min(now.file ?? 0, files.length - 1)
   const isOpen = (file: FileDiff) => !now.toggled.includes(file.key)
   const isAllOpen = turn.files.every(isOpen)
@@ -240,7 +244,7 @@ export async function paneOf($: $, e: RenderInput<'Pane'>, actions: PaneActions)
   let drawnRows = MAX_DRAWN_ROWS
 
   const card = (index: number) => {
-    const { file, rows, width, pages } = files[index]!
+    const { file, rows, isSplit, width, pages } = files[index]!
     const open = isTooLarge || isOpen(file)
     const page = Math.min(now.pages[file.key] ?? 0, Math.max(0, pages.length - 1))
     const shown = pages[page] ?? []
@@ -271,7 +275,7 @@ export async function paneOf($: $, e: RenderInput<'Pane'>, actions: PaneActions)
         {open && shown.length > 0 && fits && (
           <Box flexDirection="column">
             {shown.map(row =>
-              mode === 'split' ? splitRow(ui, row as SplitRow, look) : unifiedRow(ui, row as Row, look),
+              isSplit ? splitRow(ui, row as SplitRow, look) : unifiedRow(ui, row as Row, look),
             )}
           </Box>
         )}
