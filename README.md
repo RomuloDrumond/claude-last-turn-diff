@@ -2,19 +2,23 @@
 
 A Claude Code mod that shows the file edits Claude made in the last turn, and lets you step back through earlier turns. It works in the Claude Desktop app's Code tab and in the terminal. It doesn't use git: it builds diffs from Claude's own Edit, Write and NotebookEdit tool calls.
 
-- **Hint above the prompt.** After a turn that edited files, a line such as `Last turn: 3 files, +40 -12 [View diff]` appears above the prompt. It disappears after a turn that edited nothing.
-- **`/lastturn` pane.** Opens a pane with the newest turn that had edits. The pane shows:
-  - a header with the turn label (`T7 · first words of the prompt…`), the file count and the +/- totals
-  - one row per file with its +/- counts. Click the row to collapse or expand that file.
-  - unified hunks for each open file, with 3 lines of context
-- **Navigation.** `◀ Prev turn` (`p`) and `Next turn ▶` (`n`) step through the turns. `a` expands or collapses every file. A file with many hunks shows them a page at a time, which keeps the pane under the 100,000-character limit for what it can draw.
+- **Hint above the prompt.** After a turn that edited files, a line such as `Last turn changed 3 files  +40 −12  [View changes]` appears above the prompt. It disappears after a turn that edited nothing.
+- **`/lastturn` pane.** Opens a GitHub-style view of the newest turn that had edits:
+  - a header with the turn label (`T7 · first words of the prompt…`) and `3 files changed  +40 −12`
+  - one card per file with its path, an Added or Modified badge, the +/− counts and five green/red squares for their mix. Click a card to collapse or expand it.
+  - the lines of each open file with the old and new line numbers, red and green rows for removed and added lines, and the words that changed within a reworded line marked
+  - a `⋯ 23 unchanged lines (lines 12–34)` row wherever unchanged lines are skipped
+- **Unified or split.** `Split view` (`s`) puts the old file beside the new one, as GitHub's split diff does; `Unified view` interleaves them. The choice is remembered across sessions.
+- **Navigation.** `◀ Older` (`p`), `Newer ▶` (`n`) and a turn picker step through the turns. `a` expands or collapses every file. A long file shows 150 lines at a time, which keeps the pane under the 100,000-character limit for what it can draw.
+
+The colors come from the theme keys Claude Code uses for its own diffs (`diffAdded`, `diffRemoved`, `diffAddedWord`, `diffRemovedWord`), so they follow the light or dark theme.
 
 ## How it works
 
 - A `tool.call` hook reads the file before Edit or Write runs, lets the call through unchanged, and then reads the file again. Calls that were denied, failed, or held for review (`staged`) are skipped.
 - Edits are grouped by turn, from `turn.start` to `turn.complete`. Each file's diff compares the file before its first edit in the turn with the file after its last edit in the turn. A small Myers diff in plain TypeScript computes it, with no dependencies.
 - When a session starts, after `/resume`, or after a fork, the mod reads the turns back from the transcript (`$.session.messages()`). It uses the `originalFile` and `content` fields that Edit and Write store there, so the pane survives a reload. `/clear` empties the list.
-- The pane and the hint draw only `Box`, `Text`, `Button` and `Code` (with `format: 'diff'`). Every surface supports these elements, the desktop included.
+- The pane and the hint draw only `Box`, `Text`, `Button` and, where the surface has it, `Select`. The desktop supports all of them; there is no `Raster` or `Image`. Rows are plain text, so there is no syntax colouring.
 
 ## Limits
 
@@ -60,7 +64,7 @@ claude plugin validate .
 claude plugin test .
 ```
 
-The tests in `tests/` simulate Edit and Write tool calls and turn boundaries, then read the drawn pane on both the terminal and desktop surfaces.
+The tests in `tests/` simulate Edit and Write tool calls and turn boundaries, then read the drawn pane (rows, tints, word marks, split view, turn picker) on both the terminal and desktop surfaces.
 
 When the engine loads the mod, it writes `.claude-plugin/types/` and a `tsconfig.json`. After that, `tsc -p .` type-checks the mod. Git ignores both generated files.
 

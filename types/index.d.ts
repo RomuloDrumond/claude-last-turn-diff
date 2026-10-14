@@ -34,9 +34,13 @@ export type PaneView = {
   at: number
   // Files whose expansion was flipped from the default, by key.
   toggled: string[]
-  // Each file's page of hunks, by key; 0 when absent.
+  // Each file's page of rows, by key; 0 when absent.
   pages: Record<string, number>
+  // Lines interleaved (unified) or old beside new (split); unified when absent.
+  mode?: DiffMode
 }
+
+export type DiffMode = 'unified' | 'split'
 
 // The one-line hint above the prompt.
 export type BandHint = { n: number; files: number; added: number; removed: number }
