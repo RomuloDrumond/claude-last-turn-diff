@@ -3,5 +3,6 @@
   "version": "0.1.0",
   "description": "Shows the file edits Claude made in the last turn, and earlier turns, in a pane, built from its own Edit, Write and NotebookEdit calls (no git).",
   "author": { "name": "Romulo Drumond" },
+  "license": "MIT",
   "types": "./types/index.d.ts"
 }
