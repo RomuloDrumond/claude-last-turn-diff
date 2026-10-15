@@ -6,3 +6,4 @@ tmp/
 *.tmp
 tsconfig.json
 .claude-plugin/types/
+.vscode/

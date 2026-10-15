@@ -1,0 +1,12 @@
+{
+  "name": "last-turn-diff-screenshots",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "make": "bun make.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.0",
+    "playwright-core": "1.56.1"
+  }
+}

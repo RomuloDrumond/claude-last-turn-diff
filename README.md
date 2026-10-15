@@ -131,6 +131,12 @@ The tests in `tests/` simulate Edit and Write tool calls and turn boundaries, th
 
 When the engine loads the mod, it writes `.claude-plugin/types/` and a `tsconfig.json`. After that, `tsc -p .` type-checks the mod. Git ignores both generated files.
 
+The images in this README are drawn from the mod's real output. `docs/screenshots/fixture.ts` mounts the pane on a small made-up project, and `make.ts` draws what it prints as pages styled like Claude Desktop and a terminal, then photographs them with headless Chrome. After changing the UI, rebuild them:
+
+```bash
+cd docs/screenshots && bun install && bun make.ts
+```
+
 To release, bump `version` in `.claude-plugin/plugin.json` and run `claude plugin tag --push .`. Installs are cached by version, so bump it for every release.
 
 </details>
