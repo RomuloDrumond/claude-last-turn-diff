@@ -1,0 +1,12 @@
+{
+  "name": "last-turn-diff",
+  "description": "GitHub-style diffs of the files Claude edited in the last turn, for Claude Desktop and the terminal",
+  "owner": { "name": "Romulo Drumond" },
+  "plugins": [
+    {
+      "name": "last-turn-diff",
+      "source": "./",
+      "description": "A GitHub-style diff of the files Claude edited in the last turn, in Claude Desktop and the terminal."
+    }
+  ]
+}

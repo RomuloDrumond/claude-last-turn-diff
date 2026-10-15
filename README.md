@@ -42,14 +42,22 @@ A Claude Code mod that shows the file edits Claude made in the last turn, and le
   - Each file keeps about 150,000 characters of hunks.
   - Each turn keeps about 600,000 characters of hunks.
 
-## Load it
+## Install
 
-You need Claude Code 2.1.286 or later.
+You need Claude Code 2.1.286 or later. In the terminal or in a Claude Desktop Code session, run:
+
+```
+/plugin install last-turn-diff --marketplace RomuloDrumond/claude-last-turn-diff
+```
+
+Then run `/reload-plugins` or start a new session, and run `/lastturn`. Get new versions with `claude plugin update last-turn-diff`.
+
+## Load it from a checkout
 
 **Terminal**, for one session:
 
 ```bash
-claude --plugin-dir ~/projects/claude-last-turn-diff
+claude --plugin-dir /path/to/claude-last-turn-diff
 ```
 
 **Claude Desktop (Code tab).** Desktop doesn't accept `--plugin-dir`. Instead, add the folder to `CLAUDE_CODE_PLUGIN_DIRS` under `env` in `~/.claude/settings.json`. Separate several folders with `:`.
@@ -57,7 +65,7 @@ claude --plugin-dir ~/projects/claude-last-turn-diff
 ```json
 {
   "env": {
-    "CLAUDE_CODE_PLUGIN_DIRS": "/Users/romulodrumond/projects/claude-last-turn-diff"
+    "CLAUDE_CODE_PLUGIN_DIRS": "/path/to/claude-last-turn-diff"
   }
 }
 ```
