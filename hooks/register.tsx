@@ -9,6 +9,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ResultOf } from 'claude-code'
 
 import type { BandHint, DiffMode, TurnDiff } from '../types'
+import { diffstat } from './icons'
 import { MODE_KEY, NEWEST, WRAP_KEY } from './state'
 import { EDIT_TOOLS, MAX_TEXT_CHARS, stepOf, turnOf, turnsFromMessages } from './turns'
 import type { Step } from './turns'
@@ -77,8 +78,11 @@ async function rebuild($: $) {
   await update($, band, () => (newest !== undefined && newest.n === count ? hintOf(newest) : null))
 }
 
+// The same turn read twice: the same files, and the same number or title
+// (a title from an older version of the mod may read differently).
 const sameTurn = (a: TurnDiff, b: TurnDiff) =>
-  a.title === b.title && a.files.map(file => file.key).join('\n') === b.files.map(file => file.key).join('\n')
+  (a.n === b.n || a.title === b.title) &&
+  a.files.map(file => file.key).join('\n') === b.files.map(file => file.key).join('\n')
 
 // The pane's Refresh: reads the transcript again and adds the turns it holds
 // that were not recorded live (before the mod loaded, or lost to a reload).
@@ -237,13 +241,24 @@ export const register: Register = on => {
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const hint = await read($, band)
     if (hint === null || e.props.hasSurvey) return next(e)
-    const { Box, Text, Button } = $.ui.resolve(e)
+    const elements = $.ui.resolve(e)
+    const { Box, Text, Button } = elements
+    const Svg = e.surface !== 'terminal' && 'Svg' in elements ? elements.Svg : undefined
+    const squares = diffstat(hint.added, hint.removed)
     return (
-      <Box flexDirection="row" gap={1}>
+      <Box flexDirection="row" gap={1} alignItems="center">
         <Text wrap="truncate-end">
           <Text dimColor>Last turn changed {plural(hint.files, 'file')}</Text>{'  '}
           <Text color="success">+{hint.added}</Text> <Text color="error">−{hint.removed}</Text>
         </Text>
+        {Svg !== undefined && (
+          <Svg
+            alt={`${hint.added} added, ${hint.removed} removed`}
+            source={squares.source}
+            width={squares.width}
+            height={squares.height}
+          />
+        )}
         <Button key="open-last-turn-diff" label="View changes" hotkey="d" onPress={() => void openPane($)} />
       </Box>
     )
@@ -268,7 +283,12 @@ export const register: Register = on => {
       },
       refresh: () => refresh($),
     }
-    const model = { list: await read($, turns), now: await read($, view) }
+    const model = {
+      list: await read($, turns),
+      now: await read($, view),
+      surface: e.surface,
+      columns: e.props.bodyColumns,
+    }
     return paneTree($.ui.resolve(e), model, actions)
   })
 }

@@ -125,12 +125,31 @@ export function displayName(path: string, cwd: string): string {
   return cwd !== '' && path.startsWith(root) ? path.slice(root.length) : path
 }
 
+// What a prompt the engine wrote reads as: a background task's notification
+// by its summary, a slash command by its name and arguments, any other
+// tagged prompt by its text without the tags.
+function readable(prompt: string): string {
+  const text = prompt.trim()
+  if (!text.startsWith('<')) return text
+  if (text.startsWith('<task-notification>')) {
+    const summary = /<summary>([\s\S]*?)<\/summary>/.exec(text)?.[1]
+    return `Background task: ${summary?.trim() || 'finished'}`
+  }
+  const command = /<command-name>([\s\S]*?)<\/command-name>/.exec(text)?.[1]
+  if (command !== undefined) {
+    const args = /<command-args>([\s\S]*?)<\/command-args>/.exec(text)?.[1] ?? ''
+    return `${command.trim()} ${args.trim()}`.trim()
+  }
+  return text.replace(/<[^>]*>/g, ' ')
+}
+
 export function titleOf(prompt: string): string {
-  const words = prompt.trim().split(/\s+/).filter(Boolean)
+  const text = readable(prompt)
+  const words = text.split(/\s+/).filter(Boolean)
   if (words.length === 0) return '(no prompt)'
   let title = words.slice(0, TITLE_WORDS).join(' ')
   if (title.length > TITLE_CHARS) title = title.slice(0, TITLE_CHARS - 1).trimEnd()
-  return title.length < prompt.trim().length ? `${title}…` : title
+  return title.length < words.join(' ').length ? `${title}…` : title
 }
 
 function keepUpTo(hunks: Hunks, budget: number): { hunks: string[]; dropped: number } {
