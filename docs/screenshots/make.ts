@@ -6,7 +6,8 @@
 //   cd docs/screenshots && bun install && bun make.ts
 //
 // It uses the installed Google Chrome; set CHROME_PATH to use another
-// Chromium, and CLAUDE_BIN to run the tests with another claude.
+// Chromium, and CLAUDE_BIN to run the tests with another claude. That claude
+// must be 2.1.299 or later: older engines refuse the text the fixture draws.
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'

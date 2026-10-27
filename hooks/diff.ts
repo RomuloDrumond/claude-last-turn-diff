@@ -13,8 +13,10 @@ const MAX_D = 1500
 // A hunk longer than this is split into several, each with its own header,
 // so one paged view never has to hold a whole rewritten file.
 const MAX_HUNK_LINES = 200
-// A drawn line is cut here (minified files would swamp the pane).
+// A drawn line is cut here (minified files would swamp the pane), and ends
+// in CUT_MARK.
 const MAX_LINE_CHARS = 400
+const CUT_MARK = '…'
 
 export function splitLines(text: string): string[] {
   if (text === '') return []
@@ -112,9 +114,18 @@ function header(ops: Numbered[]): string {
   return `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`
 }
 
+// A line as it is kept: cut after MAX_LINE_CHARS, never between the two
+// halves of a surrogate pair.
 function cut(line: string): string {
-  return line.length > MAX_LINE_CHARS ? `${line.slice(0, MAX_LINE_CHARS)}…` : line
+  if (line.length <= MAX_LINE_CHARS) return line
+  const isPairCut = /[\ud800-\udbff]/.test(line[MAX_LINE_CHARS - 1]!)
+  return line.slice(0, isPairCut ? MAX_LINE_CHARS - 1 : MAX_LINE_CHARS) + CUT_MARK
 }
+
+// Whether a kept line is the start of a longer one (a line of its own that
+// is that long and ends in the mark reads as one too). Its text without the
+// mark is what was kept.
+export const isCutLine = (line: string) => line.length >= MAX_LINE_CHARS && line.endsWith(CUT_MARK)
 
 // Hunk texts (header and body, no trailing newline) for the change from
 // `before` to `after`, with CONTEXT lines around each change.
@@ -172,3 +183,14 @@ export function patchHunks(
   })
   return { hunks, added, removed }
 }
+
+// Hunk texts as a unified diff of the file named `name`, as git writes one;
+// an absolute name keeps no a/ or b/ prefix.
+export function patchOf(name: string, isNew: boolean, hunks: readonly string[]): string {
+  const side = (prefix: string) => (name.startsWith('/') ? name : prefix + name)
+  return [isNew ? '--- /dev/null' : `--- ${side('a/')}`, `+++ ${side('b/')}`, ...hunks, ''].join('\n')
+}
+
+// Whether hunk texts hold a line kept cut.
+export const hasCutLine = (text: string) =>
+  text.split('\n').some(line => /^[-+ ]/.test(line) && isCutLine(line.slice(1)))

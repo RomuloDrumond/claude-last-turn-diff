@@ -92,6 +92,8 @@ function world(on: On) {
     ['/work/README.md', '# Tasks\n\nA tiny task list.\n'],
   ])
   mock.store(on)
+  // An engine whose Text takes `mono`, so Desktop draws the lines as text.
+  on('session.version', () => ({ value: { version: '2.1.299', base: '2.1.299' } }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/work' }))
   on('session.messages', () => ({ value: [] }))

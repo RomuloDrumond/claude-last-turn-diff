@@ -7,7 +7,7 @@ export type TokenClass = 'keyword' | 'string' | 'comment' | 'constant' | 'functi
 
 export type Token = { from: number; to: number; kind: TokenClass }
 
-type Language = {
+export type Language = {
   keywords: ReadonlySet<string>
   constants: ReadonlySet<string>
   lineComments: readonly string[]

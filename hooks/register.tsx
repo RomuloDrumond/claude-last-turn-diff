@@ -10,15 +10,20 @@ import type { EngineInterface, Register, ResultOf } from 'claude-code'
 
 import type { BandHint, DiffMode, TurnDiff } from '../types'
 import { diffstat } from './icons'
+import { plural } from './rows'
 import { MODE_KEY, NEWEST, WRAP_KEY } from './state'
 import { EDIT_TOOLS, MAX_TEXT_CHARS, stepOf, turnOf, turnsFromMessages } from './turns'
 import type { Step } from './turns'
-import { PANE, paneTree, plural } from './view'
+import { PANE, paneTree } from './view'
 import type { PaneActions } from './view'
 
 const TITLE = 'Last turn diff'
 // How many turns with edits are kept.
 const KEEP_TURNS = 30
+// The first engine whose Text takes `mono`. Claude Desktop draws the diff as
+// its own text from there; 2.1.295 refuses the prop, and one refused prop
+// replaces the whole pane with the engine's own.
+const MONO_TEXT_SINCE = [2, 1, 299] as const
 
 type $ = EngineInterface
 
@@ -32,6 +37,24 @@ async function cwdOf($: $): Promise<string> {
     return await $.session.cwd()
   } catch {
     return ''
+  }
+}
+
+// Whether this engine's Text takes `mono`, from the release it is built
+// from. An engine that cannot say, or says it in a way this cannot read,
+// draws the diff as pictures.
+async function hasMonoTextOn($: $): Promise<boolean> {
+  try {
+    const { version, base } = await $.session.version()
+    const parts = /^(\d+)\.(\d+)\.(\d+)/.exec(base ?? version)
+    if (parts === null) return false
+    for (let k = 0; k < MONO_TEXT_SINCE.length; k++) {
+      const part = Number(parts[k + 1])
+      if (part !== MONO_TEXT_SINCE[k]) return part > MONO_TEXT_SINCE[k]!
+    }
+    return true
+  } catch {
+    return false
   }
 }
 
@@ -149,6 +172,9 @@ export const register: Register = on => {
   let pending: Step[] = []
   let prompt = ''
   let turnId: string | undefined
+  // Whether Desktop's Text takes `mono` here, read once the pane first draws
+  // on Desktop; the engine does not change while the module is loaded.
+  let hasMonoText: boolean | undefined
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -282,12 +308,21 @@ export const register: Register = on => {
         }
       },
       refresh: () => refresh($),
+      copy: async (text, what, surface) => {
+        try {
+          const copied = await $.ui.copy({ text, surface })
+          $.ui.toast(copied.isCopied ? `Copied ${what}` : `Could not copy ${what}`)
+        } catch {
+          // This surface has no clipboard to copy to.
+        }
+      },
     }
     const model = {
       list: await read($, turns),
       now: await read($, view),
       surface: e.surface,
       columns: e.props.bodyColumns,
+      hasMonoText: e.surface === 'desktop' && (hasMonoText ??= await hasMonoTextOn($)),
     }
     return paneTree($.ui.resolve(e), model, actions)
   })
