@@ -2,7 +2,21 @@
   "name": "last-turn-diff",
   "version": "0.2.0",
   "description": "Shows the file edits Claude made in the last turn, and earlier turns, in a pane, built from its own Edit, Write and NotebookEdit calls (no git).",
-  "author": { "name": "Romulo Drumond" },
+  "author": {
+    "name": "Romulo Drumond"
+  },
   "license": "MIT",
+  "keywords": [
+    "diff",
+    "code-review",
+    "diff-viewer",
+    "claude-desktop",
+    "edits"
+  ],
+  "homepage": "https://github.com/RomuloDrumond/claude-last-turn-diff",
+  "repository": "https://github.com/RomuloDrumond/claude-last-turn-diff",
+  "documentationUrl": "https://github.com/RomuloDrumond/claude-last-turn-diff#readme",
+  "supportUrl": "https://github.com/RomuloDrumond/claude-last-turn-diff/issues",
+  "privacyPolicyUrl": "https://github.com/RomuloDrumond/claude-last-turn-diff/blob/main/PRIVACY.md",
   "types": "./types/index.d.ts"
 }
