@@ -12,7 +12,7 @@ const uri = (svg: string) => `data:image/svg+xml;base64,${Buffer.from(svg).toStr
 const attr = (s: string) => esc(s).replace(/"/g, '&quot;')
 
 // The theme keys Desktop maps to its colours, as page variables.
-const KEYS: Record<string, string> = {
+const THEME_VARS: Record<string, string> = {
   text: 'text', inactive: 'secondary', subtle: 'muted', error: 'danger', success: 'success', warning: 'warning',
   claude: 'brand', permission: 'accent', suggestion: 'accent', remember: 'accent', ide: 'accent', autoAccept: 'pro',
   merged: 'merged', planMode: 'success',
@@ -23,7 +23,7 @@ const ANSI: Record<string, string> = {
 }
 const colorOf = (value: unknown): string | undefined => {
   if (typeof value !== 'string') return undefined
-  if (KEYS[value]) return `var(--${KEYS[value]})`
+  if (THEME_VARS[value]) return `var(--${THEME_VARS[value]})`
   if (ANSI[value.replace(/^ansi:/, '')]) return ANSI[value.replace(/^ansi:/, '')]
   return /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(value) || /^(?:rgb|hsl)a?\([\d\s.,%/]+\)$/i.test(value) ? value : undefined
 }

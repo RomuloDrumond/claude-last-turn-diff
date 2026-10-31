@@ -25,14 +25,12 @@ const KEEP_TURNS = 30
 // replaces the whole pane with the engine's own.
 const MONO_TEXT_SINCE = [2, 1, 299] as const
 
-type $ = EngineInterface
-
 const turns = atom({ plugin: 'last-turn-diff', key: 'turns' } as const, [])
 const view = atom({ plugin: 'last-turn-diff', key: 'view' } as const, NEWEST)
 const band = atom({ plugin: 'last-turn-diff', key: 'band' } as const, null)
 const turnNo = atom({ plugin: 'last-turn-diff', key: 'turnNo' } as const, 0)
 
-async function cwdOf($: $): Promise<string> {
+async function cwdOf($: EngineInterface): Promise<string> {
   try {
     return await $.session.cwd()
   } catch {
@@ -43,7 +41,7 @@ async function cwdOf($: $): Promise<string> {
 // Whether this engine's Text takes `mono`, from the release it is built
 // from. An engine that cannot say, or says it in a way this cannot read,
 // draws the diff as pictures.
-async function hasMonoTextOn($: $): Promise<boolean> {
+async function hasMonoTextOn($: EngineInterface): Promise<boolean> {
   try {
     const { version, base } = await $.session.version()
     const parts = /^(\d+)\.(\d+)\.(\d+)/.exec(base ?? version)
@@ -58,7 +56,7 @@ async function hasMonoTextOn($: $): Promise<boolean> {
   }
 }
 
-async function readText($: $, path: string): Promise<string | null | undefined> {
+async function readText($: EngineInterface, path: string): Promise<string | null | undefined> {
   try {
     if (!(await $.fs.exists(path))) return null
     const text = await $.fs.read(path)
@@ -69,19 +67,20 @@ async function readText($: $, path: string): Promise<string | null | undefined> 
 }
 
 // Back to the newest turn, keeping the person's display choices.
-const toNewest = ($: $) =>
-  update($, view, was => ({
+function toNewest($: EngineInterface) {
+  return update($, view, was => ({
     ...NEWEST,
     ...(was.mode !== undefined ? { mode: was.mode } : {}),
     ...(was.wrap !== undefined ? { wrap: was.wrap } : {}),
   }))
+}
 
-async function openPane($: $) {
+async function openPane($: EngineInterface) {
   await toNewest($)
   return $.ui.open({ id: PANE, title: TITLE, focus: true })
 }
 
-async function fromTranscript($: $) {
+async function fromTranscript($: EngineInterface) {
   try {
     return turnsFromMessages(await $.session.messages(), await cwdOf($), KEEP_TURNS)
   } catch {
@@ -90,7 +89,7 @@ async function fromTranscript($: $) {
 }
 
 // Rebuilds the turns from the transcript: after a reload, /resume or a fork.
-async function rebuild($: $) {
+async function rebuild($: EngineInterface) {
   const transcript = await fromTranscript($)
   if (transcript === undefined) return
   const { turns: found, count } = transcript
@@ -110,7 +109,7 @@ const sameTurn = (a: TurnDiff, b: TurnDiff) =>
 // The pane's Refresh: reads the transcript again and adds the turns it holds
 // that were not recorded live (before the mod loaded, or lost to a reload).
 // A turn recorded live is kept as recorded: it has its subagents' edits too.
-async function refresh($: $) {
+async function refresh($: EngineInterface) {
   const transcript = await fromTranscript($)
   if (transcript === undefined) return
   const live = await read($, turns)
@@ -136,7 +135,7 @@ async function refresh($: $) {
   }
 }
 
-async function reset($: $) {
+async function reset($: EngineInterface) {
   await update($, turns, () => [])
   await update($, turnNo, () => 0)
   await toNewest($)
@@ -144,7 +143,7 @@ async function reset($: $) {
 }
 
 // The person's unified or split and wrap choices, kept across sessions.
-async function restoreChoices($: $) {
+async function restoreChoices($: EngineInterface) {
   try {
     const kept = await $.store.get(MODE_KEY)
     if (kept === 'unified' || kept === 'split') {
