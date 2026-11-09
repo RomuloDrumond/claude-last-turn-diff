@@ -13,7 +13,7 @@ import { languageOf } from './syntax'
 import type { Language, TokenClass } from './syntax'
 
 // One cell of SF Mono or Menlo at 12px, the face's 0.6em advance.
-export const CHAR_PX = 7.22
+const CHAR_PX = 7.22
 const ROW_PX = 20
 const BASELINE_PX = 14
 const NUMBER_PAD_PX = 8
@@ -100,9 +100,15 @@ function rowsOfLine(line: Line, side: Side, wrap: boolean, language: Language | 
     }
   }
 
+  const isCut = !wrap && text.length > side.chars
   const cuts: [number, number][] = []
-  if (!wrap || text.length <= side.chars) {
-    cuts.push([0, Math.min(text.length, wrap ? text.length : side.chars)])
+  if (isCut) {
+    // The row's last cell is the ellipsis's; never between the two halves
+    // of a surrogate pair.
+    const to = side.chars - 1
+    cuts.push([0, /[\ud800-\udbff]/.test(text[to - 1]!) ? to - 1 : to])
+  } else if (!wrap || text.length <= side.chars) {
+    cuts.push([0, text.length])
   } else {
     for (let from = 0; from < text.length; ) {
       let to = Math.min(text.length, from + side.chars)
@@ -128,12 +134,7 @@ function rowsOfLine(line: Line, side: Side, wrap: boolean, language: Language | 
     }
     return runs
   })
-  if (!wrap && text.length > side.chars) {
-    const runs = rows[0]!
-    const last = runs[runs.length - 1]
-    if (last !== undefined) last.text = last.text.slice(0, -1)
-    runs.push({ text: '…', at: side.chars - 1, isChanged: false, kind: 'comment' })
-  }
+  if (isCut) rows[0]!.push({ text: '…', at: cuts[0]![1], isChanged: false, kind: 'comment' })
   return rows
 }
 

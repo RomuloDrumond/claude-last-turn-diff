@@ -6,7 +6,7 @@ export type FileDiff = {
   key: string
   // The path as drawn, relative to the session's directory when inside it.
   name: string
-  // The path the Code element infers a language from.
+  // The path as the tool named it, whose file name tells the language.
   path: string
   isNew: boolean
   added: number
@@ -47,7 +47,7 @@ export type PaneView = {
 export type DiffMode = 'unified' | 'split'
 
 // The one-line hint above the prompt.
-export type BandHint = { n: number; files: number; added: number; removed: number }
+export type BandHint = { files: number; added: number; removed: number }
 
 declare module 'claude-code' {
   interface PluginState {

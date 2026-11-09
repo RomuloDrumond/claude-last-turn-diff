@@ -1,4 +1,4 @@
-// A small line-at-a-time highlighter for the diff picture: keywords,
+// A small line-at-a-time highlighter for the diff's lines: keywords,
 // strings, comments, numbers and constants, function and type names. It
 // knows a handful of language families by file extension and reads each
 // line on its own, so a string or comment spanning lines is only guessed.
@@ -108,7 +108,7 @@ const BY_NAME: Record<string, Language> = {
 }
 
 export function languageOf(path: string): Language | undefined {
-  const name = path.slice(path.lastIndexOf('/') + 1).replace(/#.*$/, '')
+  const name = path.slice(path.lastIndexOf('/') + 1)
   const byName = BY_NAME[name]
   if (byName !== undefined) return byName
   const dot = name.lastIndexOf('.')

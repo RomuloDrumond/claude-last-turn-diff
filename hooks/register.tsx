@@ -100,11 +100,15 @@ async function rebuild($: EngineInterface) {
   await update($, band, () => (newest !== undefined && newest.n === count ? hintOf(newest) : null))
 }
 
-// The same turn read twice: the same files, and the same number or title
-// (a title from an older version of the mod may read differently).
-const sameTurn = (a: TurnDiff, b: TurnDiff) =>
-  (a.n === b.n || a.title === b.title) &&
-  a.files.map(file => file.key).join('\n') === b.files.map(file => file.key).join('\n')
+// Whether a turn held live is the one the transcript stored: the same
+// number or title (a title from an older version of the mod may read
+// differently), and every file the transcript names. The live one may hold
+// more: its subagents' files, which the transcript leaves out.
+function sameTurn(live: TurnDiff, stored: TurnDiff) {
+  if (live.n !== stored.n && live.title !== stored.title) return false
+  const held = new Set(live.files.map(file => file.key))
+  return stored.files.every(file => held.has(file.key))
+}
 
 // The pane's Refresh: reads the transcript again and adds the turns it holds
 // that were not recorded live (before the mod loaded, or lost to a reload).
@@ -113,20 +117,23 @@ async function refresh($: EngineInterface) {
   const transcript = await fromTranscript($)
   if (transcript === undefined) return
   const live = await read($, turns)
-  const shown = live[(await read($, view)).at]
+  // The turn the pane shows, followed to where the merge puts it.
+  let shown = live[(await read($, view)).at]
   const matched = new Set<TurnDiff>()
   const found = transcript.turns.map(turn => {
     const free = live.filter(one => !matched.has(one) && sameTurn(one, turn))
     const hit = free.find(one => one.n === turn.n) ?? free[0]
     if (hit === undefined) return turn
     matched.add(hit)
-    return { ...hit, n: turn.n }
+    const numbered = { ...hit, n: turn.n }
+    if (hit === shown) shown = numbered
+    return numbered
   })
   const onlyLive = live.filter(one => !matched.has(one))
   const merged = [...found, ...onlyLive].sort((a, b) => b.n - a.n).slice(0, KEEP_TURNS)
   await update($, turns, () => merged)
   await update($, turnNo, count => Math.max(count, transcript.count))
-  const at = shown === undefined ? 0 : Math.max(0, merged.findIndex(turn => turn.n === shown.n && turn.title === shown.title))
+  const at = shown === undefined ? 0 : Math.max(0, merged.indexOf(shown))
   await update($, view, was => ({ ...was, at }))
   try {
     $.ui.toast(`Refreshed: ${plural(merged.length, 'turn')} with edits`)
@@ -158,7 +165,6 @@ async function restoreChoices($: EngineInterface) {
 }
 
 const hintOf = (turn: TurnDiff): BandHint => ({
-  n: turn.n,
   files: turn.files.length,
   added: turn.added,
   removed: turn.removed,
@@ -210,10 +216,14 @@ export const register: Register = on => {
     }
   })
 
+  // A subagent's run starts a turn of its own inside the person's: its edits
+  // are recorded with that turn's, under that turn's prompt and number.
   on('turn.start', ($, e, next) => {
-    prompt = e.text
-    turnId = e.turnId
-    void update($, turnNo, count => count + 1)
+    if (e.agentId === undefined) {
+      prompt = e.text
+      turnId = e.turnId
+      void update($, turnNo, count => count + 1)
+    }
     return next(e)
   })
 

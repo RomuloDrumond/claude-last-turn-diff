@@ -3,6 +3,7 @@ import type { SessionMessage } from 'claude-code'
 import type { FileDiff, TurnDiff } from '../types'
 import { patchHunks, unifiedHunks } from './diff'
 import type { Hunks } from './diff'
+import { plural } from './rows'
 
 export const EDIT_TOOLS: ReadonlySet<string> = new Set(['Edit', 'Write', 'NotebookEdit'])
 
@@ -120,7 +121,7 @@ export function stepOf(
   return null
 }
 
-export function displayName(path: string, cwd: string): string {
+function displayName(path: string, cwd: string): string {
   const root = cwd.endsWith('/') ? cwd : `${cwd}/`
   return cwd !== '' && path.startsWith(root) ? path.slice(root.length) : path
 }
@@ -209,7 +210,7 @@ function fileOf(steps: Step[], cwd: string): FileDiff | null {
     else return null
   }
   const kept = keepUpTo(hunks, MAX_FILE_CHARS)
-  if (kept.dropped > 0) note = `${kept.dropped} more hunks not kept`
+  if (kept.dropped > 0) note = `${plural(kept.dropped, 'more hunk')} not kept`
   return {
     key: first.key,
     name,

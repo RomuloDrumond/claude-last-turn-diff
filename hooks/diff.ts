@@ -18,7 +18,7 @@ const MAX_HUNK_LINES = 200
 const MAX_LINE_CHARS = 400
 const CUT_MARK = '…'
 
-export function splitLines(text: string): string[] {
+function splitLines(text: string): string[] {
   if (text === '') return []
   const lines = text.split('\n')
   if (lines[lines.length - 1] === '') lines.pop()

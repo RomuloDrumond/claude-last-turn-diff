@@ -8,7 +8,7 @@
 export type Icon = { source: string; width: number; height: number }
 
 // Squares in a diffstat, as GitHub draws five.
-export const SQUARES = 5
+const SQUARES = 5
 const SQUARE_PX = 8
 const SQUARE_GAP_PX = 2
 

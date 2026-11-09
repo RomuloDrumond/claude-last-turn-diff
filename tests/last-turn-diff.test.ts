@@ -830,6 +830,120 @@ describe('last-turn-diff', () => {
     const ui = await mount($, { ...PANE, surface: 'terminal' })
     expect(await shown(ui)).toContain('No file edits recorded')
   })
+
+  test('the terminal ends a page of long lines before it outgrows what it draws, split too', async ($, on) => {
+    world(on)
+    await start($)
+    // Split, 150 rows of these would hold more than the terminal draws.
+    const lines = (tag: string) => Array.from({ length: 160 }, (_, k) => `${k} ${tag} ${'word '.repeat(58)}`).join('\n') + '\n'
+    await turn($, 1, 'add', () => write($, '/work/data.txt', lines('old')))
+    await turn($, 2, 'rewrite', () => write($, '/work/data.txt', lines('new')))
+
+    const ui = await mount($, { ...PANE, surface: 'terminal' })
+    for (const press of [[], ['mode']]) {
+      for (const key of press) await ui.press({ key })
+      expect(await shown(ui)).not.toContain('too large to draw here')
+      const { counts, total } = await pageThrough(ui, 0)
+      expect(sum(counts)).toBe(total)
+    }
+  })
+
+  test("a subagent's run inside a turn leaves the turn its prompt, its number and every edit", async ($, on) => {
+    world(on)
+    await start($)
+    await $.turn.start({ text: 'ask a helper for notes', turnId: 'turn-1' })
+    await editAnswer($)
+    await $.turn.start({ text: 'write the notes', turnId: 'helper-1', agentId: 'helper' })
+    await write($, '/work/notes.md', '# Notes\n')
+    await $.turn.complete({ answer: 'Written.', durationMs: 5, isAborted: false, turnId: 'helper-1', reason: 'answer', agentId: 'helper' })
+    await $.turn.complete({ answer: 'Done.', durationMs: 10, isAborted: false, turnId: 'turn-1', reason: 'answer' })
+
+    const ui = await mount($, { ...PANE, surface: 'terminal' })
+    expect(await shown(ui)).toContain('T1 · ask a helper for notes')
+    expect(await shown(ui)).toContain('2 files changed')
+  })
+
+  // The transcript holds the main loop's edits only: its turn is the live
+  // one, which has a subagent's file too.
+  test('Refresh keeps a turn recorded live with more files than the transcript holds', async ($, on) => {
+    const messages: SessionMessage[] = []
+    world(on, { messages })
+    await start($)
+    await turn($, 1, 'first edit', async () => {
+      await editAnswer($)
+      await write($, '/work/notes.md', '# Notes\n')
+    })
+    messages.push(
+      { role: 'user', text: 'first edit', toolUses: [] },
+      {
+        role: 'assistant',
+        text: '',
+        toolUses: [
+          {
+            tool_use_id: 'use-1',
+            tool: 'Edit',
+            input: { file_path: '/work/src/answer.ts', old_string: '  return 1', new_string: '  return 42' },
+            result: { filePath: '/work/src/answer.ts', originalFile: SOURCE, oldString: '  return 1', newString: '  return 42' },
+            text: 'ok',
+          },
+        ],
+      },
+    )
+
+    const ui = await mount($, { ...PANE, surface: 'terminal' })
+    await ui.press({ key: 'refresh' })
+    expect(await shown(ui)).toContain('2 files changed')
+    expect(await shown(ui)).not.toContain('with edits')
+  })
+
+  test('Refresh stays on the turn it showed when the transcript numbers it anew', async ($, on) => {
+    const messages: SessionMessage[] = []
+    world(on, { messages })
+    await start($)
+    await turn($, 1, 'first edit', () => editAnswer($))
+    await turn($, 2, 'second file', () => write($, '/work/notes.md', '# Notes\n'))
+    const prompt = (text: string): SessionMessage => ({ role: 'user', text, toolUses: [] })
+    const wrote = (path: string, content: string): SessionMessage => ({
+      role: 'assistant',
+      text: '',
+      toolUses: [
+        {
+          tool_use_id: `use-${path}`,
+          tool: 'Write',
+          input: { file_path: path, content },
+          result: { type: 'create', filePath: path, content, structuredPatch: [] },
+          text: 'ok',
+        },
+      ],
+    })
+    messages.push(
+      prompt('old prompt'),
+      wrote('/work/old.md', 'old\n'),
+      prompt('first edit'),
+      {
+        role: 'assistant',
+        text: '',
+        toolUses: [
+          {
+            tool_use_id: 'use-1',
+            tool: 'Edit',
+            input: { file_path: '/work/src/answer.ts', old_string: '  return 1', new_string: '  return 42' },
+            result: { filePath: '/work/src/answer.ts', originalFile: SOURCE, oldString: '  return 1', newString: '  return 42' },
+            text: 'ok',
+          },
+        ],
+      },
+      prompt('second file'),
+      wrote('/work/notes.md', '# Notes\n'),
+    )
+
+    const ui = await mount($, { ...PANE, surface: 'terminal' })
+    await ui.press({ key: 'prev' })
+    expect(await shown(ui)).toContain('T1 · first edit')
+    await ui.press({ key: 'refresh' })
+    expect(await shown(ui)).toContain('T2 · first edit')
+    expect(await shown(ui)).toContain('turn 2 of 3 with edits')
+  })
 })
 
 // The pane's controls, in both of Desktop's drawings (on the terminal too,
@@ -1317,6 +1431,16 @@ describe('diffPictures', () => {
     expect(linesOf(cut.source)).toContain('…')
   })
 
+  test('a cut line never ends in half an emoji', () => {
+    // At 300 pixels a row holds 29 characters, the last one the ellipsis's.
+    for (const lead of [26, 27, 28]) {
+      const line = rowsOf(unifiedHunks('a\n', `${'x'.repeat(lead)}😀${'y'.repeat(20)}\n`).hunks)
+      const { source } = diffPictures(line, { ...options, width: 300, wrap: false })[0]!
+      expect(source).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/)
+      expect(linesOf(source)).toContain(lead === 26 ? `${'x'.repeat(26)}😀…` : `${'x'.repeat(lead)}…`)
+    }
+  })
+
   test('split puts each side in a viewport of its own', () => {
     const source = diffPictures(splitRowsOf(rows), { ...options, isSplit: true })[0]!.source
     expect(source).toContain('<svg width="50%"')
@@ -1372,6 +1496,20 @@ describe('tokensOf', () => {
 
   test('leaves files of no known language plain', () => {
     expect(kinds('return 1', 'notes.txt')).toEqual([])
+  })
+})
+
+describe('turnOf', () => {
+  test('a file past what it may keep says how many hunks it left out', () => {
+    // Three hunks of about 74,000 characters each: the file keeps two.
+    const quiet = Array.from({ length: 10 }, (_, k) => `quiet ${k}`)
+    const added = (tag: string) => Array.from({ length: 190 }, (_, k) => `${tag}${k} ${'x'.repeat(380)}`)
+    const text = (tags: string[]) => tags.flatMap(tag => [...(tag === '' ? [] : added(tag)), ...quiet]).join('\n') + '\n'
+    const path = '/work/big.txt'
+    const step = { key: path, path, before: text(['', '', '']), after: text(['a', 'b', 'c']) }
+    const [file] = turnOf(1, 'grow', [step], '/work').files
+    expect(file?.hunks.length).toBe(2)
+    expect(file?.note).toBe('1 more hunk not kept')
   })
 })
 

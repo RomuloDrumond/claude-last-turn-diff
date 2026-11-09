@@ -36,7 +36,7 @@ import type { DiffMode, FileDiff, PaneView, TurnDiff } from '../types'
 import { hasCutLine, patchOf } from './diff'
 import { diffstat, emptyPicture, fileIcon, newPill, squaresOf, turnIcon, warningIcon } from './icons'
 import type { Icon } from './icons'
-import { blocksOf, gapWhere, keepSpaces, plural, rowsIn, splitRowsOf } from './rows'
+import { blocksOf, gapText, keepSpaces, plural, rowsIn, splitRowsOf } from './rows'
 import type { Gap, Line, LineKind, Row, Span, SplitRow } from './rows'
 import { NOTHING, fits, minus, most, plus, sizeOf } from './size'
 import type { Size } from './size'
@@ -145,9 +145,23 @@ function shortPath(name: string): string {
   return chars.length > MAX_OPTION_PATH ? `…${chars.slice(1 - MAX_OPTION_PATH).join('')}` : name
 }
 
-function pagesOf<T>(rows: readonly T[]): T[][] {
+// The terminal's pages of a file's rows: a page ends after PAGE_ROWS rows,
+// or before the row that would take it past what the terminal draws, and
+// holds at least one row.
+function pagesOf<T extends Row | SplitRow>(rows: readonly T[], width: number): T[][] {
   const pages: T[][] = []
-  for (let at = 0; at < rows.length; at += PAGE_ROWS) pages.push(rows.slice(at, at + PAGE_ROWS))
+  let chars = 0
+  for (const row of rows) {
+    const cost = charsOf([row], width)
+    const last = pages[pages.length - 1]
+    if (last === undefined || last.length >= PAGE_ROWS || chars + cost > MAX_DRAWN_CHARS) {
+      pages.push([row])
+      chars = cost
+    } else {
+      last.push(row)
+      chars += cost
+    }
+  }
   return pages
 }
 
@@ -250,7 +264,7 @@ function gapRow(ui: Kit, gap: Gap, look: Look) {
   return (
     <ui.Box flexDirection="row">
       <ui.Text dimColor wrap="truncate-end">
-        {NBSP.repeat(look.width)} ⋯ {plural(gap.count, 'unchanged line')} ({gapWhere(gap)})
+        {NBSP.repeat(look.width)} {gapText(gap)}
       </ui.Text>
     </ui.Box>
   )
@@ -634,9 +648,9 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
   )
 
   if (drawing === 'rows') {
-    // The terminal pages each file by rows, and counts the characters a
-    // page draws.
-    const paged = files.map(one => pagesOf(one.rows))
+    // The terminal pages each file by rows and by the characters a page
+    // draws, and counts what every open page draws together.
+    const paged = files.map(one => pagesOf(one.rows, one.width))
     const isTooLarge =
       isTooLargeToList ||
       (files.length > 1 &&

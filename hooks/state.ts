@@ -1,5 +1,6 @@
-// What the hooks and the drawing share besides their $.state values (whose
-// atoms each file declares where it reads them, as the validator requires).
+// What the hooks module and the drawing share: the view a pane starts from
+// and the $.store keys. The $.state atoms are the hooks module's alone, which
+// hands the drawing what it reads from them.
 
 import type { PaneView } from '../types'
 

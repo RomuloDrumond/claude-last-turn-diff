@@ -200,7 +200,7 @@ export const TINT = {
 export const plural = (count: number, word: string) => `${count} ${word}${count === 1 ? '' : 's'}`
 
 // Which lines a gap row skips, as it names them.
-export const gapWhere = (gap: Gap) =>
+const gapWhere = (gap: Gap) =>
   gap.count === 1 ? `line ${gap.from}` : `lines ${gap.from}–${gap.from + gap.count - 1}`
 
 // What a gap row says.
