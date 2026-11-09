@@ -36,7 +36,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const str = (value: unknown): string | undefined =>
   typeof value === 'string' ? value : undefined
 
-function patchOf(value: unknown): Hunks | undefined {
+// The hunks a tool reported in its result's `structuredPatch`, if it holds
+// any that read as hunks.
+function reportedHunks(value: unknown): Hunks | undefined {
   if (!Array.isArray(value) || value.length === 0) return undefined
   const parts = value.filter(
     (part): part is Patch[number] =>
@@ -94,7 +96,7 @@ export function stepOf(
 
   const path = str(out.filePath) ?? str(input.file_path)
   if (path === undefined) return null
-  const patch = patchOf(out.structuredPatch)
+  const patch = reportedHunks(out.structuredPatch)
 
   if (tool === 'Write') {
     const before =

@@ -8,7 +8,6 @@ import { unifiedHunks } from '../hooks/diff'
 import { diffstat, fileIcon, squaresOf } from '../hooks/icons'
 import { blocksOf, rowsIn, rowsOf, splitRowsOf, wordSpans } from '../hooks/rows'
 import { sizeOf } from '../hooks/size'
-import { diffPictures } from '../hooks/svg'
 import { languageOf, tokensOf } from '../hooks/syntax'
 import { titleOf, turnOf } from '../hooks/turns'
 import { paneTree } from '../hooks/view'
@@ -19,14 +18,10 @@ declare const console: { log: (...parts: unknown[]) => void }
 
 const PLUGIN = 'last-turn-diff'
 const SURFACES = ['terminal', 'desktop'] as const
-// The engine the tests' sessions say they run on: Desktop draws its own text
-// from 2.1.299, pictures before.
+// The engine the tests' sessions say they run on: Desktop draws the diff as
+// its own text from 2.1.299, and nothing of it before.
 const TEXT_ENGINE = '2.1.299'
-const PICTURE_ENGINE = '2.1.295'
-const DESKTOP_ENGINES = [TEXT_ENGINE, PICTURE_ENGINE] as const
-type DesktopEngine = (typeof DESKTOP_ENGINES)[number]
-const versionOf = (engine: string) => ({ version: engine, base: engine })
-const drawingOn = (engine: DesktopEngine) => (engine === TEXT_ENGINE ? 'text' : 'pictures')
+const OLD_ENGINE = '2.1.295'
 // The text a pane allows itself (view.tsx), under the 100,000 characters
 // the engine draws: a tree past it had its end blanked by the engine.
 const MAX_TEXT = 90_000
@@ -212,38 +207,9 @@ async function mount($: Engine, target: Target): Promise<Drawn> {
   }
 }
 
-// Engine 2.1.295 refuses Text's `mono` and draws its own pane in place of
-// one that holds it, so Desktop's text cannot be drawn there. The first
-// refusal is noted once; the tests of the text drawing stop at their mount
-// on that engine, and the tests of the pictures it draws instead still run.
-let isMonoRefused = false
-async function mountText($: Engine, target: Target): Promise<Drawn | undefined> {
-  if (isMonoRefused) return undefined
-  try {
-    return await mount($, target)
-  } catch (error) {
-    if (!String(error).includes('"mono" is not allowed')) throw error
-    isMonoRefused = true
-    console.log('NOTE: this engine refuses Text `mono` (Claude Desktop 2.1.295): the desktop text tests are skipped here.')
-    return undefined
-  }
-}
-
-// Mounts on a surface of a session on `engine`: on the desktop, its text or
-// its pictures (undefined where the text cannot be drawn, as mountText).
-const mountOn = (
-  $: Engine,
-  surface: (typeof SURFACES)[number],
-  target: Omit<Target, 'surface'> = PANE,
-  engine: DesktopEngine = TEXT_ENGINE,
-) =>
-  surface === 'desktop' && engine === TEXT_ENGINE
-    ? mountText($, { ...target, surface } as Target)
-    : mount($, { ...target, surface } as Target)
-
-// The surfaces a test of `engine` draws on: the terminal, which reads no
-// version, with the first engine only.
-const surfacesOn = (engine: DesktopEngine) => (engine === TEXT_ENGINE ? SURFACES : (['desktop'] as const))
+// Mounts the pane on a surface.
+const mountOn = ($: Engine, surface: (typeof SURFACES)[number], target: Omit<Target, 'surface'> = PANE) =>
+  mount($, { ...target, surface } as Target)
 
 // Everything the drawing shows, no-break spaces read as spaces.
 async function shown(ui: Pick<Mounted, 'findAll'>): Promise<string> {
@@ -251,38 +217,14 @@ async function shown(ui: Pick<Mounted, 'findAll'>): Promise<string> {
   return all.map(one => one.text).join('\n').replace(/\u00a0/g, ' ')
 }
 
-// The text of an SVG picture's lines, one <text> a line, entities read.
-const linesOf = (source: string) =>
-  source
-    .replace(/<style>[\s\S]*?<\/style>/g, '')
-    .replace(/<text[^>]*>/g, '\n')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&')
-
-// The diff pictures a graphical surface drew, as their markup.
-async function pictures(ui: Pick<Mounted, 'findAll'>): Promise<string[]> {
-  return (await ui.findAll({ type: 'Svg' }))
-    .filter(one => String(one.props.alt).startsWith('Diff of'))
-    .map(one => String(one.props.source))
-}
-
 // The small pictures beside the text and buttons, by what they say.
 async function icons(ui: Pick<Mounted, 'findAll'>): Promise<string[]> {
-  return (await ui.findAll({ type: 'Svg' }))
-    .map(one => String(one.props.alt))
-    .filter(alt => !alt.startsWith('Diff of'))
+  return (await ui.findAll({ type: 'Svg' })).map(one => String(one.props.alt))
 }
 
 // The code Desktop drew as its own text, one string a line.
 async function codeLines(ui: Pick<Mounted, 'findAll'>): Promise<string[]> {
   return (await ui.findAll({ type: 'Text' })).filter(one => one.props.mono === true).map(one => one.text)
-}
-
-// Everything the pane shows: its elements' text and its pictures' lines.
-async function content(ui: Pick<Mounted, 'findAll'>): Promise<string> {
-  return [await shown(ui), ...(await pictures(ui)).map(linesOf)].join('\n')
 }
 
 // The Text elements drawn on a background, by theme key or colour.
@@ -340,7 +282,6 @@ describe('last-turn-diff', () => {
     expect(await marked(ui, 'diffRemovedWord')).toEqual(['1'])
     expect(await marked(ui, 'diffAddedWord')).toEqual(['42'])
     expect((await ui.findAll({ type: 'Box' })).some(box => box.props.backgroundColor === 'diffAdded')).toBe(true)
-    expect(await pictures(ui)).toEqual([])
     // The terminal's own selection copies from it: it has no copy buttons.
     expect(await ui.find({ type: 'Button', key: 'copy-0' })).toBeUndefined()
   })
@@ -350,10 +291,8 @@ describe('last-turn-diff', () => {
     await start($)
     await turn($, 1, 'make the answer forty-two please', () => editAnswer($))
 
-    const ui = await mountText($, { ...PANE, surface: 'desktop' })
-    if (ui === undefined) return
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
     expect(await shown(ui)).toContain('T1 · make the answer forty-two please')
-    expect(await pictures(ui)).toEqual([])
     // The code alone, in the monospaced face.
     expect(await codeLines(ui)).toEqual(['export function answer() {', '  return 1', '  return 42', '}'])
     // Both numbers and the sign on a plain button: dim beside an unchanged
@@ -401,8 +340,7 @@ describe('last-turn-diff', () => {
       await turn($, 1, 'add the table', () => write($, path, before))
       await turn($, 2, 'bump the table', () => write($, path, after))
 
-      const ui = await mountText($, { ...PANE, surface: 'desktop' })
-      if (ui === undefined) return
+      const ui = await mount($, { ...PANE, surface: 'desktop' })
       if (isSplit) await ui.press({ key: 'mode' })
       const drawn = await ui.drawn()
       const list = [
@@ -435,8 +373,7 @@ describe('last-turn-diff', () => {
     await start($)
     await turn($, 1, 'edit', () => editAnswer($))
 
-    const ui = await mountText($, { ...PANE, surface: 'desktop' })
-    if (ui === undefined) return
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
     await ui.press({ key: 'ln-0-2' })
     expect(copied).toEqual(['  return 42'])
     expect(toasts).toEqual(['Copied line 2'])
@@ -455,8 +392,7 @@ describe('last-turn-diff', () => {
     await start($)
     await turn($, 1, 'add', () => write($, '/work/odd.txt', 'x = 1\n\f\ny = "a\u001b[0mb"\n'))
 
-    const ui = await mountText($, { ...PANE, surface: 'desktop' })
-    if (ui === undefined) return
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
     expect(await codeLines(ui)).toEqual(['x = 1', '\uFFFD', 'y = "a\uFFFD[0mb"'])
     await ui.press({ key: 'ln-0-1' })
     await ui.press({ key: 'ln-0-2' })
@@ -468,8 +404,7 @@ describe('last-turn-diff', () => {
     await start($)
     await turn($, 1, 'add', () => write($, '/work/long.txt', `${'x'.repeat(600)}\n`))
 
-    const ui = await mountText($, { ...PANE, surface: 'desktop' })
-    if (ui === undefined) return
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
     await ui.press({ key: 'ln-0-0' })
     expect(copied).toEqual(['x'.repeat(400)])
     expect(toasts).toEqual(['Copied the first 400 characters of line 1'])
@@ -477,26 +412,23 @@ describe('last-turn-diff', () => {
     expect(toasts[1]).toBe('Copied the diff of long.txt, its long lines cut to their first 400 characters')
   })
 
-  for (const engine of DESKTOP_ENGINES) {
-    test(`a card's Copy diff copies its file as a unified diff (${drawingOn(engine)})`, async ($, on) => {
-      const { copied, toasts } = world(on, { version: versionOf(engine) })
-      await start($)
-      await turn($, 1, 'edit', async () => {
-        await editAnswer($)
-        await write($, '/work/notes.md', '# Notes\n')
-      })
-
-      const ui = await mountOn($, 'desktop', PANE, engine)
-      if (ui === undefined) return
-      await ui.press({ key: 'copy-0' })
-      await ui.press({ key: 'copy-1' })
-      expect(copied).toEqual([
-        ['--- a/src/answer.ts', '+++ b/src/answer.ts', '@@ -1,3 +1,3 @@', ' export function answer() {', '-  return 1', '+  return 42', ' }', ''].join('\n'),
-        ['--- /dev/null', '+++ b/notes.md', '@@ -0,0 +1,1 @@', '+# Notes', ''].join('\n'),
-      ])
-      expect(toasts).toEqual(['Copied the diff of src/answer.ts', 'Copied the diff of notes.md'])
+  test("a card's Copy diff copies its file as a unified diff", async ($, on) => {
+    const { copied, toasts } = world(on)
+    await start($)
+    await turn($, 1, 'edit', async () => {
+      await editAnswer($)
+      await write($, '/work/notes.md', '# Notes\n')
     })
-  }
+
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
+    await ui.press({ key: 'copy-0' })
+    await ui.press({ key: 'copy-1' })
+    expect(copied).toEqual([
+      ['--- a/src/answer.ts', '+++ b/src/answer.ts', '@@ -1,3 +1,3 @@', ' export function answer() {', '-  return 1', '+  return 42', ' }', ''].join('\n'),
+      ['--- /dev/null', '+++ b/notes.md', '@@ -0,0 +1,1 @@', '+# Notes', ''].join('\n'),
+    ])
+    expect(toasts).toEqual(['Copied the diff of src/answer.ts', 'Copied the diff of notes.md'])
+  })
 
   test('Copy hunk copies one hunk of a file of several, unified and split', async ($, on) => {
     const { copied, toasts } = world(on)
@@ -509,8 +441,7 @@ describe('last-turn-diff', () => {
     const second = ['@@ -12,7 +12,7 @@', ' line 12', ' line 13', ' line 14', '-line 15', '+line fifteen', ' line 16', ' line 17', ' line 18', '']
       .join('\n')
 
-    const ui = await mountText($, { ...PANE, surface: 'desktop' })
-    if (ui === undefined) return
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
     // The first hunk starts at line 1: a row of its own leads it. The gap
     // row leads the second.
     const hunkKeys = async () =>
@@ -548,37 +479,38 @@ describe('last-turn-diff', () => {
     await turn($, 1, 'add', () => write($, '/work/face.ts', "const face = '😀'\n"))
     await turn($, 2, 'smile', () => write($, '/work/face.ts', "const face = '😁'\n"))
 
-    const ui = await mountText($, { ...PANE, surface: 'desktop' })
-    if (ui === undefined) return
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
     expect(await codeLines(ui)).toEqual(["const face = '😀'", "const face = '😁'"])
     expect(await marked(ui, '#f8514966')).toEqual(['😀'])
     expect(await marked(ui, '#2ea04366')).toEqual(['😁'])
   })
 
   for (const [why, version] of [
-    ['before engine 2.1.299', { version: PICTURE_ENGINE, base: PICTURE_ENGINE }],
+    ['before engine 2.1.299', { version: OLD_ENGINE, base: OLD_ENGINE }],
     ['when the engine gives no version', null],
     ['when its version cannot be read', { version: 'nightly' }],
   ] as const) {
-    test(`Desktop draws GitHub-style pictures ${why}`, async ($, on) => {
+    test(`Desktop asks for a newer Claude Code ${why}`, async ($, on) => {
       world(on, { version })
       await start($)
       await turn($, 1, 'make the answer forty-two please', () => editAnswer($))
 
       const ui = await mount($, { ...PANE, surface: 'desktop' })
-      expect(await shown(ui)).toContain('T1 · make the answer forty-two please')
-      expect(await codeLines(ui)).toEqual([])
-      const [picture, ...rest] = await pictures(ui)
-      expect(rest).toEqual([])
-      expect(picture).toContain('class="rd"')
-      expect(picture).toContain('class="ra"')
-      expect(picture).toContain('class="wd"')
-      expect(picture).toContain('class="wa"')
-      expect(picture).toContain('<tspan x="')
-      expect(linesOf(picture!)).toContain('  return 42')
-      expect(linesOf(picture!)).toContain('export function answer() {')
-      expect(await icons(ui)).toEqual(['Prompt', '1 line added, 1 removed', 'Changed file', '1 line added, 1 removed'])
-      expect((await ui.find({ type: 'Button', key: 'refresh' }))?.props.label).toBe('↻ Refresh')
+      expect(await shown(ui)).toContain('This pane draws diffs on Claude Code 2.1.299 or later')
+      expect(await icons(ui)).toEqual(['Warning'])
+      expect(await ui.findAll({ type: 'Button' })).toEqual([])
+      // Nothing it draws there names a face, a size or a weight of its own,
+      // which that engine would refuse along with the whole pane.
+      const isStyled = ({ props = {} }: Exclude<Node, string>) => ['mono', 'size', 'tabular', 'weight'].some(prop => prop in props)
+      expect(elementsOf(await ui.drawn()).filter(isStyled)).toEqual([])
+      await ui.unmount()
+
+      // The hint and the terminal's pane need no such engine.
+      const hint = await mount($, { ...BAND, surface: 'desktop' })
+      expect(await shown(hint)).toMatch(/Last turn changed 1 file/)
+      await hint.unmount()
+      const terminal = await mount($, { ...PANE, surface: 'terminal' })
+      expect(await shown(terminal)).toMatch(/ {4}2 \+ {3}return 42/)
     })
   }
 
@@ -587,27 +519,22 @@ describe('last-turn-diff', () => {
     await start($)
     await turn($, 1, 'edit', () => editAnswer($))
 
-    const ui = await mountText($, { ...PANE, surface: 'desktop' })
-    if (ui === undefined) return
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
     expect(await codeLines(ui)).toContain('  return 42')
   })
 
-  test('only the text drawing names a face, size, weight or digits of its own', async ($, on) => {
-    world(on, { version: { version: PICTURE_ENGINE, base: PICTURE_ENGINE } })
+  test('the terminal names no face, size, weight or digits of its own', async ($, on) => {
+    world(on, { version: { version: OLD_ENGINE, base: OLD_ENGINE } })
     await start($)
     await turn($, 1, 'edit', () => editAnswer($))
 
     // The engine spells `bold` as a semibold weight; any other weight is the mod's.
     const isStyled = ({ props = {} }: Exclude<Node, string>) =>
       ['mono', 'size', 'tabular'].some(prop => prop in props) || ('weight' in props && props.bold !== true)
-    for (const surface of SURFACES) {
-      const ui = await mount($, { ...PANE, surface })
-      expect(elementsOf(await ui.drawn()).filter(isStyled)).toEqual([])
-      await ui.press({ key: 'mode' })
-      expect(elementsOf(await ui.drawn()).filter(isStyled)).toEqual([])
-      await ui.press({ key: 'mode' })
-      await ui.unmount()
-    }
+    const ui = await mount($, { ...PANE, surface: 'terminal' })
+    expect(elementsOf(await ui.drawn()).filter(isStyled)).toEqual([])
+    await ui.press({ key: 'mode' })
+    expect(elementsOf(await ui.drawn()).filter(isStyled)).toEqual([])
   })
 
   test('the band sums the last turn and opens the pane', async ($, on) => {
@@ -621,7 +548,9 @@ describe('last-turn-diff', () => {
     for (const surface of SURFACES) {
       const ui = await mount($, { ...BAND, surface })
       expect(await shown(ui)).toMatch(/Last turn changed 2 files[\s\S]*\+3[\s\S]*−1/)
-      expect(await icons(ui)).toEqual(surface === 'desktop' ? ['3 added, 1 removed'] : [])
+      expect(await icons(ui)).toEqual(surface === 'desktop' ? ['3 lines added, 1 removed'] : [])
+      // A hotkey answers on the terminal; a desktop would only draw its badge.
+      expect((await ui.find({ type: 'Button', key: 'open-last-turn-diff' }))?.props.hotkey).toBe(surface === 'terminal' ? 'd' : undefined)
       await ui.press({ key: 'open-last-turn-diff' })
       await ui.unmount()
     }
@@ -636,8 +565,7 @@ describe('last-turn-diff', () => {
     expect((await terminal.find({ type: 'Box', key: 'card-0' }))?.text.replace(/\u00a0/g, ' ')).toMatch(/notes\.md\s*New\s*\+2 −0/)
     await terminal.unmount()
 
-    const ui = await mountText($, { ...PANE, surface: 'desktop' })
-    if (ui === undefined) return
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
     expect((await ui.find({ type: 'Box', key: 'card-0' }))?.text.replace(/\u00a0/g, ' ')).toMatch(/notes\.md\s*\+2 −0/)
     expect(await icons(ui)).toContain('New file')
     expect(await icons(ui)).toContain('New')
@@ -672,8 +600,7 @@ describe('last-turn-diff', () => {
     // The choice is kept: the desktop opens split too, each side a column of
     // rows one line high, each its number then its code, cut at the side's
     // edge.
-    const desktop = await mountText($, { ...PANE, surface: 'desktop' })
-    if (desktop === undefined) return
+    const desktop = await mount($, { ...PANE, surface: 'desktop' })
     expect((await desktop.find({ type: 'Button', key: 'mode' }))?.props.label).toBe('▤ Unified view')
     const sides = elementsOf(await desktop.drawn()).filter(one => one.type === 'Box' && one.props?.width === '50%')
     expect(sides.map(side => [side.props?.flexDirection, side.props?.overflow])).toEqual([
@@ -701,54 +628,26 @@ describe('last-turn-diff', () => {
     expect(await desktop.find({ type: 'Button', key: 'wrap' })).toBeDefined()
   })
 
-  test('before 2.1.299 split view puts the old picture beside the new one', async ($, on) => {
-    world(on, { version: { version: PICTURE_ENGINE, base: PICTURE_ENGINE } })
-    await start($)
-    await turn($, 1, 'edit', () => editAnswer($))
-
-    const desktop = await mount($, { ...PANE, surface: 'desktop' })
-    await desktop.press({ key: 'mode' })
-    expect((await desktop.find({ type: 'Button', key: 'mode' }))?.props.label).toBe('▤ Unified view')
-    expect((await pictures(desktop))[0]).toContain('<svg x="50%" width="50%"')
-    // The pictures wrap each half, so their Wrap button stays.
-    expect((await desktop.find({ type: 'Button', key: 'wrap' }))?.props.label).toBe('⇥ Unwrap lines')
-  })
-
   test('a narrow pane draws unified and leaves out the split button', async ($, on) => {
     world(on)
     await start($)
     await turn($, 1, 'edit', () => editAnswer($))
 
-    const narrow = await mountText($, { ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 40 } })
-    if (narrow !== undefined) {
-      expect(await narrow.find({ type: 'Button', key: 'mode' })).toBeUndefined()
-      // The card leaves its squares out; the turn's stay.
-      expect(await icons(narrow)).toEqual(['Prompt', '1 line added, 1 removed', 'Changed file'])
-      await narrow.unmount()
-      // Desktop's text cuts each side at its edge, so it needs as much room
-      // as the terminal does.
-      const text = await mount($, { ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 80 } })
-      expect(await text.find({ type: 'Button', key: 'mode' })).toBeUndefined()
-      await text.unmount()
-      const wide = await mount($, { ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 90 } })
-      expect((await wide.find({ type: 'Button', key: 'mode' }))?.props.label).toBe('◫ Split view')
-      await wide.unmount()
-    }
-    const terminal = await mount($, { ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 70 } })
-    expect(await terminal.find({ type: 'Button', key: 'mode' })).toBeUndefined()
-  })
-
-  test("before 2.1.299 Desktop's pictures offer split view from 64 columns", async ($, on) => {
-    world(on, { version: { version: PICTURE_ENGINE, base: PICTURE_ENGINE } })
-    await start($)
-    await turn($, 1, 'edit', () => editAnswer($))
-
     const narrow = await mount($, { ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 40 } })
     expect(await narrow.find({ type: 'Button', key: 'mode' })).toBeUndefined()
-    expect((await pictures(narrow))[0]).not.toContain('width="50%"')
+    // The card leaves its squares out; the turn's stay.
+    expect(await icons(narrow)).toEqual(['Prompt', '1 line added, 1 removed', 'Changed file'])
     await narrow.unmount()
-    const desktop = await mount($, { ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 70 } })
-    expect((await desktop.find({ type: 'Button', key: 'mode' }))?.props.label).toBe('◫ Split view')
+    // Desktop's text cuts each side at its edge, so it needs as much room
+    // as the terminal does.
+    const text = await mount($, { ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 80 } })
+    expect(await text.find({ type: 'Button', key: 'mode' })).toBeUndefined()
+    await text.unmount()
+    const wide = await mount($, { ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 90 } })
+    expect((await wide.find({ type: 'Button', key: 'mode' }))?.props.label).toBe('◫ Split view')
+    await wide.unmount()
+    const terminal = await mount($, { ...PANE, surface: 'terminal', props: { ...PANE.props, bodyColumns: 70 } })
+    expect(await terminal.find({ type: 'Button', key: 'mode' })).toBeUndefined()
   })
 
   test('Unwrap lines cuts long lines instead of wrapping them', async ($, on) => {
@@ -769,8 +668,7 @@ describe('last-turn-diff', () => {
     await terminal.press({ key: 'wrap' })
     await terminal.unmount()
 
-    const desktop = await mountText($, { ...PANE, surface: 'desktop' })
-    if (desktop === undefined) return
+    const desktop = await mount($, { ...PANE, surface: 'desktop' })
     const line = async () => (await desktop.findAll({ type: 'Text', text: /note/ })).find(one => one.props.mono === true)
     // Wrapping is the Text's own way; cut, its row stays one line high.
     expect((await line())?.props.wrap).toBeUndefined()
@@ -783,24 +681,12 @@ describe('last-turn-diff', () => {
     expect((await line())?.text).toBe(long.slice(0, -1))
   })
 
-  test('before 2.1.299 Unwrap lines cuts the pictured lines with an ellipsis', async ($, on) => {
-    world(on, { version: { version: PICTURE_ENGINE, base: PICTURE_ENGINE } })
-    await start($)
-    await turn($, 1, 'edit', () => write($, '/work/long.ts', `export const note = '${'word '.repeat(60)}'\n`))
-
-    const desktop = await mount($, { ...PANE, surface: 'desktop' })
-    expect(linesOf((await pictures(desktop))[0]!)).not.toContain('…')
-    await desktop.press({ key: 'wrap' })
-    expect(linesOf((await pictures(desktop))[0]!)).toContain('…')
-  })
-
   test('blank lines stay lines and tabs stay tabs', async ($, on) => {
     world(on)
     await start($)
     await turn($, 1, 'add', () => write($, '/work/a.go', 'func a() {\n\tif x {\n\n\t\treturn 1\n\t}\n}\n'))
 
-    const ui = await mountText($, { ...PANE, surface: 'desktop' })
-    if (ui === undefined) return
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
     expect(await codeLines(ui)).toEqual(['func a() {', '\tif x {', '\n', '\t\treturn 1', '\t}', '}'])
     // A blank line holds a newline and wraps however the rest are drawn, so
     // a copy keeps it as an empty line.
@@ -816,8 +702,7 @@ describe('last-turn-diff', () => {
     await start($)
     await turn($, 1, 'add', () => write($, '/work/odd.txt', 'bell\u0007 escape\u001b[0m form\u000c del\u007f\n'))
 
-    const ui = await mountText($, { ...PANE, surface: 'desktop' })
-    if (ui === undefined) return
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
     expect(await codeLines(ui)).toEqual(['bell\uFFFD escape\uFFFD[0m form\uFFFD del\uFFFD'])
   })
 
@@ -946,220 +831,207 @@ describe('last-turn-diff', () => {
   })
 })
 
-// The pane's controls, in both of Desktop's drawings (on the terminal too,
-// once): Desktop's own text, which an engine that refuses `mono` cannot
-// draw, and the pictures before 2.1.299.
-for (const engine of DESKTOP_ENGINES) {
-  describe(`the pane's controls (${drawingOn(engine)})`, () => {
-    test('Older and Newer step through the turns, newest first', async ($, on) => {
-      world(on, { version: versionOf(engine) })
-      await start($)
-      await turn($, 1, 'first edit', () => editAnswer($))
-      await turn($, 2, 'nothing to edit', async () => {})
-      await turn($, 3, 'second file', () => write($, '/work/notes.md', '# Notes\n'))
+describe("the pane's controls", () => {
+  test('Older and Newer step through the turns, newest first', async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 1, 'first edit', () => editAnswer($))
+    await turn($, 2, 'nothing to edit', async () => {})
+    await turn($, 3, 'second file', () => write($, '/work/notes.md', '# Notes\n'))
 
-      for (const surface of surfacesOn(engine)) {
-        const ui = await mountOn($, surface, PANE, engine)
-        if (ui === undefined) continue
-        expect(await content(ui)).toContain('T3 · second file')
-        expect(await content(ui)).toContain('# Notes')
-        await ui.press({ key: 'prev' })
-        expect(await content(ui)).toContain('T1 · first edit')
-        expect(await content(ui)).toContain('  return 42')
-        await ui.press({ key: 'next' })
-        expect(await content(ui)).toContain('T3 · second file')
-        await ui.unmount()
-      }
-    })
-
-    test('the turn picker jumps to a turn', async ($, on) => {
-      world(on, { version: versionOf(engine) })
-      await start($)
-      await turn($, 1, 'first edit', () => editAnswer($))
-      await turn($, 2, 'second file', () => write($, '/work/notes.md', '# Notes\n'))
-
-      const ui = await mountOn($, 'desktop', PANE, engine)
-      if (ui === undefined) return
-      const picker = await ui.find({ type: 'Select', key: 'turn' })
-      expect(picker?.props.options).toEqual([
-        { value: '0', label: 'T2 · second file · 1 file' },
-        { value: '1', label: 'T1 · first edit · 1 file' },
-      ])
-      await ui.select({ key: 'turn', value: '1' })
+    for (const surface of SURFACES) {
+      const ui = await mountOn($, surface)
+      expect(await shown(ui)).toContain('T3 · second file')
+      expect(await shown(ui)).toContain('# Notes')
+      await ui.press({ key: 'prev' })
       expect(await shown(ui)).toContain('T1 · first edit')
-      expect(await content(ui)).toContain('  return 42')
-    })
-
-    test('a file collapses and expands from its card', async ($, on) => {
-      world(on, { version: versionOf(engine) })
-      await start($)
-      await turn($, 1, 'edit', () => editAnswer($))
-
-      const ui = await mountOn($, 'desktop', PANE, engine)
-      if (ui === undefined) return
-      expect(await content(ui)).toContain('return 42')
-      await ui.press({ key: 'toggle-0' })
-      expect(await content(ui)).not.toContain('return 42')
-      await ui.press({ key: 'toggle-0' })
-      expect(await content(ui)).toContain('return 42')
-    })
-
-    test('Collapse all and Expand all fold every card', async ($, on) => {
-      world(on, { version: versionOf(engine) })
-      await start($)
-      await turn($, 1, 'two files', async () => {
-        await editAnswer($)
-        await write($, '/work/notes.md', '# Notes\n')
-      })
-
-      const ui = await mountOn($, 'desktop', PANE, engine)
-      if (ui === undefined) return
-      expect((await ui.find({ type: 'Button', key: 'all' }))?.props.label).toBe('⊟ Collapse all')
-      expect(await content(ui)).toContain('# Notes')
-      await ui.press({ key: 'all' })
-      expect(await content(ui)).not.toContain('# Notes')
-      expect(await content(ui)).not.toContain('return 42')
-      expect((await ui.find({ type: 'Button', key: 'all' }))?.props.label).toBe('⊞ Expand all')
-      expect((await ui.find({ type: 'Button', key: 'chevron-0' }))?.props.label).toBe('⏵')
-      await ui.press({ key: 'all' })
-      expect(await content(ui)).toContain('return 42')
-      expect(await content(ui)).toContain('# Notes')
-    })
-
-    // The kit has no $.ui.scroll, so the scroll to the card is checked in a session.
-    test('Jump to file opens the file', async ($, on) => {
-      world(on, { version: versionOf(engine) })
-      await start($)
-      await turn($, 1, 'two files', async () => {
-        await editAnswer($)
-        await write($, '/work/notes.md', '# Notes\n')
-      })
-
-      const ui = await mountOn($, 'desktop', PANE, engine)
-      if (ui === undefined) return
-      await ui.press({ key: 'toggle-1' })
-      expect(await content(ui)).not.toContain('# Notes')
-      await ui.select({ key: 'jump', value: '1' })
-      expect(await content(ui)).toContain('# Notes')
-    })
-
-    test('a turn too large to draw at once shows one file at a time', async ($, on) => {
-      world(on, { version: versionOf(engine) })
-      await start($)
-      const big = (tag: string) => Array.from({ length: 200 }, (_, i) => `${tag} line ${i + 1}`).join('\n') + '\n'
-      await turn($, 1, 'generate five files', async () => {
-        for (const tag of ['a', 'b', 'c', 'd', 'e']) await write($, `/work/${tag}.txt`, big(tag))
-      })
-
-      for (const surface of surfacesOn(engine)) {
-        const ui = await mountOn($, surface, PANE, engine)
-        if (ui === undefined) continue
-        expect(await shown(ui)).toContain("This turn's diff is too large to show at once, so it shows one file at a time")
-        expect(await shown(ui)).toContain('File 1 of 5')
-        expect(await ui.find({ key: 'toggle-0' })).toBeDefined()
-        expect(await ui.find({ key: 'toggle-1' })).toBeUndefined()
-        expect(await ui.find({ key: 'all' })).toBeUndefined()
-        await ui.press({ key: 'next-file' })
-        expect(await shown(ui)).toContain('File 2 of 5')
-        expect(await content(ui)).toContain('b line 1')
-        expect(await ui.find({ key: 'toggle-0' })).toBeUndefined()
-        await ui.select({ key: 'jump', value: '4' })
-        expect(await shown(ui)).toContain('File 5 of 5')
-        expect(await content(ui)).toContain('e line 1')
-        await ui.press({ key: 'later-4' })
-        expect(await content(ui)).toContain('e line 200')
-        expect(await shown(ui)).toContain('151–200 of 200 lines')
-        await ui.press({ key: 'prev-file' })
-        expect(await shown(ui)).toContain('File 4 of 5')
-        await ui.select({ key: 'jump', value: '0' })
-        await ui.unmount()
-      }
-    })
-
-    test('Refresh adds the turns the transcript holds that were not recorded live', async ($, on) => {
-      const messages: SessionMessage[] = []
-      world(on, { messages, version: versionOf(engine) })
-      await start($)
-      await turn($, 1, 'first edit', () => editAnswer($))
-      messages.push(
-        { role: 'user', text: 'old prompt', toolUses: [] },
-        {
-          role: 'assistant',
-          text: '',
-          toolUses: [
-            {
-              tool_use_id: 'use-0',
-              tool: 'Write',
-              input: { file_path: '/work/old.md', content: 'old\n' },
-              result: { type: 'create', filePath: '/work/old.md', content: 'old\n', structuredPatch: [] },
-              text: 'ok',
-            },
-          ],
-        },
-        { role: 'user', text: 'first edit', toolUses: [] },
-        {
-          role: 'assistant',
-          text: '',
-          toolUses: [
-            {
-              tool_use_id: 'use-1',
-              tool: 'Edit',
-              input: { file_path: '/work/src/answer.ts', old_string: '  return 1', new_string: '  return 42' },
-              result: { filePath: '/work/src/answer.ts', originalFile: SOURCE, oldString: '  return 1', newString: '  return 42' },
-              text: 'ok',
-            },
-          ],
-        },
-      )
-
-      const ui = await mountOn($, 'desktop', PANE, engine)
-      if (ui === undefined) return
-      expect(await ui.find({ type: 'Select', key: 'turn' })).toBeUndefined()
-      await ui.press({ key: 'refresh' })
-      expect((await ui.find({ type: 'Select', key: 'turn' }))?.props.options).toEqual([
-        { value: '0', label: 'T2 · first edit · 1 file' },
-        { value: '1', label: 'T1 · old prompt · 1 file' },
-      ])
-      expect(await shown(ui)).toContain('T2 · first edit')
-    })
-
-    test('the turns are read back from the transcript at start', async ($, on) => {
-      const messages: SessionMessage[] = [
-        { role: 'user', text: 'old prompt', toolUses: [] },
-        {
-          role: 'assistant',
-          text: '',
-          toolUses: [
-            {
-              tool_use_id: 'use-1',
-              tool: 'Edit',
-              input: { file_path: '/work/src/answer.ts', old_string: '  return 1', new_string: '  return 7' },
-              result: {
-                filePath: '/work/src/answer.ts',
-                oldString: '  return 1',
-                newString: '  return 7',
-                originalFile: SOURCE,
-                structuredPatch: [],
-                replaceAll: false,
-              },
-              text: 'ok',
-            },
-          ],
-        },
-        { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'use-1', text: 'ok', isError: false }] },
-        { role: 'user', text: 'a later question', toolUses: [] },
-        { role: 'assistant', text: 'An answer.', toolUses: [] },
-      ]
-      world(on, { messages, version: versionOf(engine) })
-      await start($)
-
-      const ui = await mountOn($, 'desktop', PANE, engine)
-      if (ui === undefined) return
-      expect(await shown(ui)).toContain('T1 · old prompt')
-      expect(await content(ui)).toContain('  return 7')
-    })
+      expect(await shown(ui)).toContain('  return 42')
+      await ui.press({ key: 'next' })
+      expect(await shown(ui)).toContain('T3 · second file')
+      await ui.unmount()
+    }
   })
-}
+
+  test('the turn picker jumps to a turn', async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 1, 'first edit', () => editAnswer($))
+    await turn($, 2, 'second file', () => write($, '/work/notes.md', '# Notes\n'))
+
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
+    const picker = await ui.find({ type: 'Select', key: 'turn' })
+    expect(picker?.props.options).toEqual([
+      { value: '0', label: 'T2 · second file · 1 file' },
+      { value: '1', label: 'T1 · first edit · 1 file' },
+    ])
+    await ui.select({ key: 'turn', value: '1' })
+    expect(await shown(ui)).toContain('T1 · first edit')
+    expect(await shown(ui)).toContain('  return 42')
+  })
+
+  test('a file collapses and expands from its card', async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 1, 'edit', () => editAnswer($))
+
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
+    expect(await shown(ui)).toContain('return 42')
+    await ui.press({ key: 'toggle-0' })
+    expect(await shown(ui)).not.toContain('return 42')
+    await ui.press({ key: 'toggle-0' })
+    expect(await shown(ui)).toContain('return 42')
+  })
+
+  test('Collapse all and Expand all fold every card', async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 1, 'two files', async () => {
+      await editAnswer($)
+      await write($, '/work/notes.md', '# Notes\n')
+    })
+
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
+    expect((await ui.find({ type: 'Button', key: 'all' }))?.props.label).toBe('⊟ Collapse all')
+    expect(await shown(ui)).toContain('# Notes')
+    await ui.press({ key: 'all' })
+    expect(await shown(ui)).not.toContain('# Notes')
+    expect(await shown(ui)).not.toContain('return 42')
+    expect((await ui.find({ type: 'Button', key: 'all' }))?.props.label).toBe('⊞ Expand all')
+    expect((await ui.find({ type: 'Button', key: 'chevron-0' }))?.props.label).toBe('⏵')
+    await ui.press({ key: 'all' })
+    expect(await shown(ui)).toContain('return 42')
+    expect(await shown(ui)).toContain('# Notes')
+  })
+
+  // The kit has no $.ui.scroll, so the scroll to the card is checked in a session.
+  test('Jump to file opens the file', async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 1, 'two files', async () => {
+      await editAnswer($)
+      await write($, '/work/notes.md', '# Notes\n')
+    })
+
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
+    await ui.press({ key: 'toggle-1' })
+    expect(await shown(ui)).not.toContain('# Notes')
+    await ui.select({ key: 'jump', value: '1' })
+    expect(await shown(ui)).toContain('# Notes')
+  })
+
+  test('a turn too large to draw at once shows one file at a time', async ($, on) => {
+    world(on)
+    await start($)
+    const big = (tag: string) => Array.from({ length: 200 }, (_, i) => `${tag} line ${i + 1}`).join('\n') + '\n'
+    await turn($, 1, 'generate five files', async () => {
+      for (const tag of ['a', 'b', 'c', 'd', 'e']) await write($, `/work/${tag}.txt`, big(tag))
+    })
+
+    for (const surface of SURFACES) {
+      const ui = await mountOn($, surface)
+      expect(await shown(ui)).toContain("This turn's diff is too large to show at once, so it shows one file at a time")
+      expect(await shown(ui)).toContain('File 1 of 5')
+      expect(await ui.find({ key: 'toggle-0' })).toBeDefined()
+      expect(await ui.find({ key: 'toggle-1' })).toBeUndefined()
+      expect(await ui.find({ key: 'all' })).toBeUndefined()
+      await ui.press({ key: 'next-file' })
+      expect(await shown(ui)).toContain('File 2 of 5')
+      expect(await shown(ui)).toContain('b line 1')
+      expect(await ui.find({ key: 'toggle-0' })).toBeUndefined()
+      await ui.select({ key: 'jump', value: '4' })
+      expect(await shown(ui)).toContain('File 5 of 5')
+      expect(await shown(ui)).toContain('e line 1')
+      await ui.press({ key: 'later-4' })
+      expect(await shown(ui)).toContain('e line 200')
+      expect(await shown(ui)).toContain('151–200 of 200 lines')
+      await ui.press({ key: 'prev-file' })
+      expect(await shown(ui)).toContain('File 4 of 5')
+      await ui.select({ key: 'jump', value: '0' })
+      await ui.unmount()
+    }
+  })
+
+  test('Refresh adds the turns the transcript holds that were not recorded live', async ($, on) => {
+    const messages: SessionMessage[] = []
+    world(on, { messages })
+    await start($)
+    await turn($, 1, 'first edit', () => editAnswer($))
+    messages.push(
+      { role: 'user', text: 'old prompt', toolUses: [] },
+      {
+        role: 'assistant',
+        text: '',
+        toolUses: [
+          {
+            tool_use_id: 'use-0',
+            tool: 'Write',
+            input: { file_path: '/work/old.md', content: 'old\n' },
+            result: { type: 'create', filePath: '/work/old.md', content: 'old\n', structuredPatch: [] },
+            text: 'ok',
+          },
+        ],
+      },
+      { role: 'user', text: 'first edit', toolUses: [] },
+      {
+        role: 'assistant',
+        text: '',
+        toolUses: [
+          {
+            tool_use_id: 'use-1',
+            tool: 'Edit',
+            input: { file_path: '/work/src/answer.ts', old_string: '  return 1', new_string: '  return 42' },
+            result: { filePath: '/work/src/answer.ts', originalFile: SOURCE, oldString: '  return 1', newString: '  return 42' },
+            text: 'ok',
+          },
+        ],
+      },
+    )
+
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
+    expect(await ui.find({ type: 'Select', key: 'turn' })).toBeUndefined()
+    await ui.press({ key: 'refresh' })
+    expect((await ui.find({ type: 'Select', key: 'turn' }))?.props.options).toEqual([
+      { value: '0', label: 'T2 · first edit · 1 file' },
+      { value: '1', label: 'T1 · old prompt · 1 file' },
+    ])
+    expect(await shown(ui)).toContain('T2 · first edit')
+  })
+
+  test('the turns are read back from the transcript at start', async ($, on) => {
+    const messages: SessionMessage[] = [
+      { role: 'user', text: 'old prompt', toolUses: [] },
+      {
+        role: 'assistant',
+        text: '',
+        toolUses: [
+          {
+            tool_use_id: 'use-1',
+            tool: 'Edit',
+            input: { file_path: '/work/src/answer.ts', old_string: '  return 1', new_string: '  return 7' },
+            result: {
+              filePath: '/work/src/answer.ts',
+              oldString: '  return 1',
+              newString: '  return 7',
+              originalFile: SOURCE,
+              structuredPatch: [],
+              replaceAll: false,
+            },
+            text: 'ok',
+          },
+        ],
+      },
+      { role: 'user', text: '', toolUses: [], toolResults: [{ tool_use_id: 'use-1', text: 'ok', isError: false }] },
+      { role: 'user', text: 'a later question', toolUses: [] },
+      { role: 'assistant', text: 'An answer.', toolUses: [] },
+    ]
+    world(on, { messages })
+    await start($)
+
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
+    expect(await shown(ui)).toContain('T1 · old prompt')
+    expect(await shown(ui)).toContain('  return 7')
+  })
+})
 
 describe("Desktop's bounds", () => {
   // Every tree these draw passes Desktop's checks (`mount`), page by page.
@@ -1171,8 +1043,7 @@ describe("Desktop's bounds", () => {
       await turn($, 1, 'add', () => write($, '/work/src/table.ts', before))
       await turn($, 2, 'bump', () => write($, '/work/src/table.ts', after))
 
-      const ui = await mountText($, { ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 130 } })
-      if (ui === undefined) return
+      const ui = await mount($, { ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 130 } })
       // Past the cap a line drops its colours, then marks its changes as one.
       const codes = elementsOf(await ui.drawn()).filter(one => one.props?.mono === true)
       expect(codes.length).toBeGreaterThan(0)
@@ -1194,8 +1065,7 @@ describe("Desktop's bounds", () => {
     await turn($, 1, 'add', () => write($, '/work/src/table.ts', before))
     await turn($, 2, 'bump', () => write($, '/work/src/table.ts', after))
 
-    const ui = await mountText($, { ...PANE, surface: 'desktop' })
-    if (ui === undefined) return
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
     expect(await shown(ui)).not.toContain('too large to draw here')
     expect(await shown(ui)).not.toContain('collapse another file')
     expect((await codeLines(ui)).length).toBeGreaterThan(50)
@@ -1214,8 +1084,7 @@ describe("Desktop's bounds", () => {
     await turn($, 1, 'add', () => write($, '/work/src/values.ts', lines(() => false)))
     await turn($, 2, 'rename', () => write($, '/work/src/values.ts', lines(k => k % 3 === 0)))
 
-    const ui = await mountText($, { ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 130 } })
-    if (ui === undefined) return
+    const ui = await mount($, { ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 130 } })
     // A line this plain keeps its colours and marks under the cap.
     expect(await marked(ui, '#2ea04366')).toContain('computeFast')
     expect((await ui.findAll({ type: 'Text' })).some(one => one.props.color === 'inactive')).toBe(true)
@@ -1236,8 +1105,7 @@ describe("Desktop's bounds", () => {
     const minified = `var a={${Array.from({ length: 500 }, (_, k) => `k${k}:${k}`).join(',')}};\n`
     await turn($, 1, 'add', () => write($, '/work/app.min.js', minified.repeat(3)))
 
-    const ui = await mountText($, { ...PANE, surface: 'desktop' })
-    if (ui === undefined) return
+    const ui = await mount($, { ...PANE, surface: 'desktop' })
     const lines = await codeLines(ui)
     expect(lines.length).toBe(3)
     expect(lines.every(line => line.length >= 400 && minified.startsWith(line.slice(0, 400)))).toBe(true)
@@ -1245,63 +1113,59 @@ describe("Desktop's bounds", () => {
     expect((await codeLines(ui)).length).toBe(3)
   })
 
-  for (const engine of DESKTOP_ENGINES) {
-    test(`a turn of 70 files lists at most 64 of them to jump to (${drawingOn(engine)})`, async ($, on) => {
-      world(on, { version: versionOf(engine) })
-      await start($)
-      await turn($, 1, 'scaffold', async () => {
-        for (let k = 0; k < 70; k++) await write($, `/work/files/f${k}.txt`, `file ${k}\n`)
-      })
-
-      for (const surface of surfacesOn(engine)) {
-        const ui = await mountOn($, surface, PANE, engine)
-        if (ui === undefined) continue
-        const options = async () =>
-          ((await ui.find({ type: 'Select', key: 'jump' }))?.props.options as { value: string }[]).map(one => Number(one.value))
-        expect(await shown(ui)).toContain('File 1 of 70')
-        expect(await options()).toEqual(Array.from({ length: 64 }, (_, k) => k))
-        await ui.select({ key: 'jump', value: '40' })
-        expect(await shown(ui)).toContain('File 41 of 70')
-        expect(await options()).toEqual(Array.from({ length: 64 }, (_, k) => k + 6))
-        expect((await ui.find({ type: 'Select', key: 'jump' }))?.props.value).toBe('40')
-        await ui.press({ key: 'next-file' })
-        expect(await content(ui)).toContain('file 41')
-        await ui.select({ key: 'jump', value: '9' })
-        await ui.select({ key: 'jump', value: '0' })
-        await ui.unmount()
-      }
+  test('a turn of 70 files lists at most 64 of them to jump to', async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 1, 'scaffold', async () => {
+      for (let k = 0; k < 70; k++) await write($, `/work/files/f${k}.txt`, `file ${k}\n`)
     })
 
-    // The jump list's labels, the turn picker and the card's path count
-    // against the text the engine draws, before the lines: past it, the
-    // engine would blank the page's last lines and its pager.
-    test(`long paths in a 70-file turn leave a page room to draw (${drawingOn(engine)})`, async ($, on) => {
-      world(on, { version: versionOf(engine) })
-      await start($)
-      const folder = `/work/${'a-rather-long-folder-name/'.repeat(30)}`
-      const { before, after } = numberTable(80, 150)
-      await turn($, 1, 'add the data', () => write($, `${folder}data.ts`, before))
-      await turn($, 2, 'bump the data and scaffold', async () => {
-        await write($, `${folder}data.ts`, after)
-        for (let k = 1; k < 70; k++) await write($, `${folder}f${k}.txt`, `file ${k}\n`)
-      })
+    for (const surface of SURFACES) {
+      const ui = await mountOn($, surface)
+      const options = async () =>
+        ((await ui.find({ type: 'Select', key: 'jump' }))?.props.options as { value: string }[]).map(one => Number(one.value))
+      expect(await shown(ui)).toContain('File 1 of 70')
+      expect(await options()).toEqual(Array.from({ length: 64 }, (_, k) => k))
+      await ui.select({ key: 'jump', value: '40' })
+      expect(await shown(ui)).toContain('File 41 of 70')
+      expect(await options()).toEqual(Array.from({ length: 64 }, (_, k) => k + 6))
+      expect((await ui.find({ type: 'Select', key: 'jump' }))?.props.value).toBe('40')
+      await ui.press({ key: 'next-file' })
+      expect(await shown(ui)).toContain('file 41')
+      await ui.select({ key: 'jump', value: '9' })
+      await ui.select({ key: 'jump', value: '0' })
+      await ui.unmount()
+    }
+  })
 
-      const ui = await mountOn($, 'desktop', { ...PANE, props: { ...PANE.props, bodyColumns: 130 } }, engine)
-      if (ui === undefined) return
-      const labels = ((await ui.find({ type: 'Select', key: 'jump' }))?.props.options as { label: string }[]).map(one => one.label)
-      expect(labels.every(label => label.startsWith('…') && label.length < 100)).toBe(true)
-      for (const press of [[], ['mode']]) {
-        for (const key of press) await ui.press({ key })
-        expect(await shown(ui)).not.toContain('too large to draw here')
-        const { counts, total } = await pageThrough(ui, 0)
-        expect(sum(counts)).toBe(total)
-        expect((await ui.findAll({ type: 'Button' })).every(one => one.props.label !== '')).toBe(true)
-      }
+  // The jump list's labels, the turn picker and the card's path count
+  // against the text the engine draws, before the lines: past it, the
+  // engine would blank the page's last lines and its pager.
+  test('long paths in a 70-file turn leave a page room to draw', async ($, on) => {
+    world(on)
+    await start($)
+    const folder = `/work/${'a-rather-long-folder-name/'.repeat(30)}`
+    const { before, after } = numberTable(80, 150)
+    await turn($, 1, 'add the data', () => write($, `${folder}data.ts`, before))
+    await turn($, 2, 'bump the data and scaffold', async () => {
+      await write($, `${folder}data.ts`, after)
+      for (let k = 1; k < 70; k++) await write($, `${folder}f${k}.txt`, `file ${k}\n`)
     })
-  }
 
-  test('before 2.1.299 two dense files show one at a time, each a page at a time', async ($, on) => {
-    world(on, { version: versionOf(PICTURE_ENGINE) })
+    const ui = await mount($, { ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 130 } })
+    const labels = ((await ui.find({ type: 'Select', key: 'jump' }))?.props.options as { label: string }[]).map(one => one.label)
+    expect(labels.every(label => label.startsWith('…') && label.length < 100)).toBe(true)
+    for (const press of [[], ['mode']]) {
+      for (const key of press) await ui.press({ key })
+      expect(await shown(ui)).not.toContain('too large to draw here')
+      const { counts, total } = await pageThrough(ui, 0)
+      expect(sum(counts)).toBe(total)
+      expect((await ui.findAll({ type: 'Button' })).every(one => one.props.label !== '')).toBe(true)
+    }
+  })
+
+  test('two dense files show one at a time, each a page at a time', async ($, on) => {
+    world(on)
     await start($)
     const tables = ['a', 'b'].map(name => ({ path: `/work/src/${name}.ts`, ...numberTable(60, 100) }))
     await turn($, 1, 'add', async () => {
@@ -1322,20 +1186,6 @@ describe("Desktop's bounds", () => {
     }
   })
 
-  test('before 2.1.299 a page of pictures stays within the bounds', async ($, on) => {
-    world(on, { version: { version: PICTURE_ENGINE, base: PICTURE_ENGINE } })
-    await start($)
-    const { before, after } = numberTable(60)
-    await turn($, 1, 'add', () => write($, '/work/src/table.ts', before))
-    await turn($, 2, 'bump', () => write($, '/work/src/table.ts', after))
-
-    const ui = await mount($, { ...PANE, surface: 'desktop', props: { ...PANE.props, bodyColumns: 130 } })
-    expect((await pictures(ui)).every(source => source.length < 131_072)).toBe(true)
-    expect((await ui.findAll({ type: 'Svg' })).every(one => Number(one.props.height ?? 0) <= 4096)).toBe(true)
-    expect(await shown(ui)).not.toContain('too large to draw here')
-    const unified = await pageThrough(ui, 0)
-    expect(sum(unified.counts)).toBe(unified.total)
-  })
 })
 
 describe('unifiedHunks', () => {
@@ -1403,76 +1253,6 @@ describe('rows', () => {
   })
 })
 
-describe('diffPictures', () => {
-  const before = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join('\n') + '\n'
-  const after = before.replace('line 10\n', 'line ten\n')
-  const rows = rowsOf(unifiedHunks(before, after).hunks)
-  const options = { width: 600, wrap: true, path: 'a.txt', digits: 2, isSplit: false, isNew: false }
-
-  test('draws each row with its numbers, sign and tint, and a row for each gap', () => {
-    const [picture, ...rest] = diffPictures(rows, options)
-    expect(rest).toEqual([])
-    expect(picture!.height).toBe(20 * rows.length)
-    const lines = linesOf(picture!.source)
-    expect(lines).toContain('⋯ 6 unchanged lines (lines 1–6)')
-    expect(lines).toMatch(/\n10\n−\nline 10/)
-    expect(lines).toMatch(/\n10\n\+\nline ten/)
-    expect(picture!.source).toContain('width="100%"')
-  })
-
-  test('wraps a long line after a space, or cuts it with an ellipsis', () => {
-    const long = rowsOf(unifiedHunks('a\n', `${'word '.repeat(80)}\n`).hunks)
-    const wrapped = diffPictures(long, { ...options, width: 300 })[0]!
-    const rowsDrawn = (source: string) => (source.match(/<text y=/g) ?? []).length
-    expect(rowsDrawn(wrapped.source)).toBeGreaterThan(3)
-    expect(linesOf(wrapped.source)).not.toMatch(/wor\nd/)
-    const cut = diffPictures(long, { ...options, width: 300, wrap: false })[0]!
-    expect(rowsDrawn(cut.source)).toBe(2)
-    expect(linesOf(cut.source)).toContain('…')
-  })
-
-  test('a cut line never ends in half an emoji', () => {
-    // At 300 pixels a row holds 29 characters, the last one the ellipsis's.
-    for (const lead of [26, 27, 28]) {
-      const line = rowsOf(unifiedHunks('a\n', `${'x'.repeat(lead)}😀${'y'.repeat(20)}\n`).hunks)
-      const { source } = diffPictures(line, { ...options, width: 300, wrap: false })[0]!
-      expect(source).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/)
-      expect(linesOf(source)).toContain(lead === 26 ? `${'x'.repeat(26)}😀…` : `${'x'.repeat(lead)}…`)
-    }
-  })
-
-  test('split puts each side in a viewport of its own', () => {
-    const source = diffPictures(splitRowsOf(rows), { ...options, isSplit: true })[0]!.source
-    expect(source).toContain('<svg width="50%"')
-    expect(source).toContain('<svg x="50%" width="50%"')
-    expect(source).toContain('class="sep"')
-  })
-
-  test('escapes markup and replaces characters XML or the engine refuses', () => {
-    const odd = rowsOf(unifiedHunks('a\n', 'if (a < b && c > d) {}\u0001\u0085\ud800\n').hunks)
-    const source = diffPictures(odd, options)[0]!.source
-    expect(source).toContain('&lt;')
-    expect(source).toContain('&amp;&amp;')
-    expect(source).not.toContain('\u0001')
-    expect(source).not.toContain('\u0085')
-    expect(source).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/)
-  })
-
-  test('a very long page is drawn as several pictures, each under the element limits', () => {
-    const text = Array.from({ length: 1500 }, (_, i) => `const value${i} = "${'x'.repeat(60)}"`).join('\n') + '\n'
-    const many = diffPictures(rowsOf(unifiedHunks('', text).hunks), { ...options, isNew: true, digits: 4 })
-    expect(many.length).toBeGreaterThan(1)
-    expect(many.every(one => one.source.length < 131_072 && one.height <= 4096)).toBe(true)
-  })
-
-  test('a page of wrapped lines starts a new picture before 4,096 pixels', () => {
-    const text = Array.from({ length: 150 }, (_, i) => `${i} ${'word '.repeat(40)}`).join('\n') + '\n'
-    const tall = diffPictures(rowsOf(unifiedHunks('', text).hunks), { ...options, width: 300, isNew: true, digits: 3 })
-    expect(tall.length).toBeGreaterThan(1)
-    expect(tall.every(one => one.height <= 4096)).toBe(true)
-  })
-})
-
 describe('tokensOf', () => {
   const kinds = (text: string, path: string) =>
     tokensOf(text, languageOf(path)).map(token => [text.slice(token.from, token.to), token.kind])
@@ -1491,6 +1271,19 @@ describe('tokensOf', () => {
       ['class', 'keyword'],
       ['Point', 'type'],
       ['# a point', 'comment'],
+    ])
+  })
+
+  test('reads a CSS name with its hyphens', () => {
+    expect(kinds('@font-face { font-family: "Inter"; margin-left: 2px }', 'a.css')).toEqual([
+      ['font-face', 'keyword'],
+      ['"Inter"', 'string'],
+      ['2', 'constant'],
+    ])
+    expect(kinds('const font-face = a-b(1)', 'a.ts')).toEqual([
+      ['const', 'keyword'],
+      ['b', 'function'],
+      ['1', 'constant'],
     ])
   })
 

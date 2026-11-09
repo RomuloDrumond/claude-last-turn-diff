@@ -1,6 +1,6 @@
-// A file's diff rows drawn as Claude Desktop's own text, where its engine's
-// Text takes `mono` (2.1.299 and later): the code in Desktop's monospaced
-// face. Desktop lets no text in a pane be selected (its window turns
+// A file's diff rows drawn as Claude Desktop's own text, which needs an
+// engine whose Text takes `mono` (2.1.299 and later): the code in Desktop's
+// monospaced face. Desktop lets no text in a pane be selected (its window turns
 // selection off and only its transcript turns it back on), so buttons copy,
 // with `$.ui.copy`: a line's numbers and sign are a plain Button's label that
 // copies its line, and the row that leads a hunk ends in a Copy hunk button.

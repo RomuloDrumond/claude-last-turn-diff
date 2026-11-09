@@ -9,9 +9,9 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ResultOf } from 'claude-code'
 
 import type { BandHint, DiffMode, TurnDiff } from '../types'
-import { diffstat } from './icons'
+import { diffstat, diffstatAlt } from './icons'
 import { plural } from './rows'
-import { MODE_KEY, NEWEST, WRAP_KEY } from './state'
+import { MODE_KEY, MONO_TEXT_SINCE, NEWEST, WRAP_KEY } from './state'
 import { EDIT_TOOLS, MAX_TEXT_CHARS, stepOf, turnOf, turnsFromMessages } from './turns'
 import type { Step } from './turns'
 import { PANE, paneTree } from './view'
@@ -20,10 +20,6 @@ import type { PaneActions } from './view'
 const TITLE = 'Last turn diff'
 // How many turns with edits are kept.
 const KEEP_TURNS = 30
-// The first engine whose Text takes `mono`. Claude Desktop draws the diff as
-// its own text from there; 2.1.295 refuses the prop, and one refused prop
-// replaces the whole pane with the engine's own.
-const MONO_TEXT_SINCE = [2, 1, 299] as const
 
 const turns = atom({ plugin: 'last-turn-diff', key: 'turns' } as const, [])
 const view = atom({ plugin: 'last-turn-diff', key: 'view' } as const, NEWEST)
@@ -40,7 +36,7 @@ async function cwdOf($: EngineInterface): Promise<string> {
 
 // Whether this engine's Text takes `mono`, from the release it is built
 // from. An engine that cannot say, or says it in a way this cannot read,
-// draws the diff as pictures.
+// counts as one that does not.
 async function hasMonoTextOn($: EngineInterface): Promise<boolean> {
   try {
     const { version, base } = await $.session.version()
@@ -101,9 +97,8 @@ async function rebuild($: EngineInterface) {
 }
 
 // Whether a turn held live is the one the transcript stored: the same
-// number or title (a title from an older version of the mod may read
-// differently), and every file the transcript names. The live one may hold
-// more: its subagents' files, which the transcript leaves out.
+// number or the same title (the two count turns and read prompts each their
+// own way, so either may differ), and every file the transcript names.
 function sameTurn(live: TurnDiff, stored: TurnDiff) {
   if (live.n !== stored.n && live.title !== stored.title) return false
   const held = new Set(live.files.map(file => file.key))
@@ -177,8 +172,8 @@ export const register: Register = on => {
   let pending: Step[] = []
   let prompt = ''
   let turnId: string | undefined
-  // Whether Desktop's Text takes `mono` here, read once the pane first draws
-  // on Desktop; the engine does not change while the module is loaded.
+  // Whether Text takes `mono` here, read once the pane first draws off the
+  // terminal; the engine does not change while the module is loaded.
   let hasMonoText: boolean | undefined
 
   on('session.start', async ($, e, next) => {
@@ -288,13 +283,18 @@ export const register: Register = on => {
         </Text>
         {Svg !== undefined && (
           <Svg
-            alt={`${hint.added} added, ${hint.removed} removed`}
+            alt={diffstatAlt(hint)}
             source={squares.source}
             width={squares.width}
             height={squares.height}
           />
         )}
-        <Button key="open-last-turn-diff" label="View changes" hotkey="d" onPress={() => void openPane($)} />
+        <Button
+          key="open-last-turn-diff"
+          label="View changes"
+          {...(e.surface === 'terminal' ? { hotkey: 'd' } : {})}
+          onPress={() => void openPane($)}
+        />
       </Box>
     )
   })
@@ -331,7 +331,7 @@ export const register: Register = on => {
       now: await read($, view),
       surface: e.surface,
       columns: e.props.bodyColumns,
-      hasMonoText: e.surface === 'desktop' && (hasMonoText ??= await hasMonoTextOn($)),
+      hasMonoText: e.surface !== 'terminal' && (hasMonoText ??= await hasMonoTextOn($)),
     }
     return paneTree($.ui.resolve(e), model, actions)
   })

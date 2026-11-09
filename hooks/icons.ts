@@ -51,6 +51,10 @@ export function squaresOf(added: number, removed: number): { added: number; remo
   return { added: green, removed: filled - green, none: SQUARES - filled }
 }
 
+// What a diffstat's squares say, for a reader that cannot see them.
+export const diffstatAlt = (counts: { added: number; removed: number }) =>
+  `${counts.added} ${counts.added === 1 ? 'line' : 'lines'} added, ${counts.removed} removed`
+
 // The five squares, green for added, red for removed, grey for the rest.
 export function diffstat(added: number, removed: number): Icon {
   const counts = squaresOf(added, removed)

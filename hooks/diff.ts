@@ -186,7 +186,7 @@ export function patchHunks(
 
 // Hunk texts as a unified diff of the file named `name`, as git writes one;
 // an absolute name keeps no a/ or b/ prefix.
-export function patchOf(name: string, isNew: boolean, hunks: readonly string[]): string {
+export function unifiedDiff(name: string, isNew: boolean, hunks: readonly string[]): string {
   const side = (prefix: string) => (name.startsWith('/') ? name : prefix + name)
   return [isNew ? '--- /dev/null' : `--- ${side('a/')}`, `+++ ${side('b/')}`, ...hunks, ''].join('\n')
 }

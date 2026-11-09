@@ -7,13 +7,14 @@
 // at a time.
 //
 // Each surface draws the lines its own way. The terminal draws Text rows
-// painted with the theme's diff keys. Claude Desktop draws its own text
-// (text.tsx), where its engine's Text takes `mono` (2.1.299 and later; 2.1.295
-// refuses it), with buttons that copy a line or a hunk. Before that, and on
-// the other graphical surfaces, each file's lines are GitHub-style pictures
-// (svg.ts). The theme's diff keys are opaque fills made for a terminal that
-// drown the text off it, and the `Code` element's diff format draws a plain
-// code block there, with no tints or line numbers. Off the terminal the
+// painted with the theme's diff keys. A graphical surface (Claude Desktop)
+// draws its own text (text.tsx) on GitHub's translucent tints, with buttons
+// that copy a line or a hunk: the theme's diff keys are opaque fills made
+// for a terminal that drown the text off it, and the `Code` element's diff
+// format draws a plain code block there, with no tints or line numbers.
+// That text needs an engine whose Text takes `mono` (2.1.299 and later; an
+// older one refuses the prop, and the whole pane with it), so on an older
+// engine the pane says so in place of the diff. Off the terminal the
 // header, the cards and the warnings carry small pictures too (icons.ts),
 // and the buttons a glyph before their label: a Button holds only text,
 // never a picture. There a card's header copies the file's diff.
@@ -33,25 +34,18 @@
 import type { Color, Elements, RenderElement, RenderSurface } from 'claude-code'
 
 import type { DiffMode, FileDiff, PaneView, TurnDiff } from '../types'
-import { hasCutLine, patchOf } from './diff'
-import { diffstat, emptyPicture, fileIcon, newPill, squaresOf, turnIcon, warningIcon } from './icons'
+import { hasCutLine, unifiedDiff } from './diff'
+import { diffstat, diffstatAlt, emptyPicture, fileIcon, newPill, squaresOf, turnIcon, warningIcon } from './icons'
 import type { Icon } from './icons'
 import { blocksOf, gapText, keepSpaces, plural, rowsIn, splitRowsOf } from './rows'
 import type { Gap, Line, LineKind, Row, Span, SplitRow } from './rows'
 import { NOTHING, fits, minus, most, plus, sizeOf } from './size'
 import type { Size } from './size'
-import { MODE_KEY, WRAP_KEY } from './state'
-import { MAX_PICTURE_PX, MAX_SOURCE_CHARS, diffPictures, markupOf, pictureFrame } from './svg'
-import type { DiffPicture, PictureOptions } from './svg'
+import { MODE_KEY, MONO_TEXT_SINCE, WRAP_KEY } from './state'
 import { textLines } from './text'
 import type { Copied, TextRow } from './text'
-import { titleOf } from './turns'
 
 type Kit = Pick<Elements['desktop'], 'Box' | 'Text' | 'Button'>
-
-// How the lines are drawn: Text rows in the theme's diff colours, Desktop's
-// own text, or pictures.
-type Drawing = 'rows' | 'text' | 'pictures'
 
 // How the terminal paints the diff: the theme's own diff colors.
 const ROW: Record<LineKind, Color | undefined> = { context: undefined, removed: 'diffRemoved', added: 'diffAdded' }
@@ -82,8 +76,8 @@ export type PaneModel = {
   now: PaneView
   surface: RenderSurface
   columns: number
-  // Whether this is Claude Desktop on an engine whose Text takes `mono`,
-  // which draws the lines as text.
+  // Whether the engine's Text takes `mono`, which a graphical surface
+  // draws the lines with; the terminal draws them without it.
   hasMonoText: boolean
 }
 
@@ -120,22 +114,11 @@ const MAX_OPTIONS = 64
 // end: 64 long paths would take much of the text the engine draws.
 const MAX_OPTION_PATH = 80
 // Narrower than this, split view has no room and the pane draws unified.
-// Desktop's pictures wrap each half, so they need less: 64 columns leave
-// each half about 25 characters.
 const MIN_SPLIT_COLUMNS = 90
-const MIN_SPLIT_COLUMNS_PICTURES = 64
 // Narrower than this, a card's header leaves the squares out.
 const MIN_SQUARES_COLUMNS = 60
-// The width of one of the pane's columns on a graphical surface, in CSS
-// pixels, and the columns a card's border takes.
-const CELL_PX = 8
-const CARD_COLUMNS = 4
 
 const MARK = { context: NBSP, removed: '−', added: '+' } as const
-
-// A turn's title; one an older version stored with the engine's tags is
-// read again.
-const titleIn = (turn: TurnDiff) => (turn.title.startsWith('<') ? titleOf(turn.title) : turn.title)
 
 const lineCount = (rows: readonly (Row | SplitRow)[]) => rows.filter(row => row.kind !== 'gap').length
 
@@ -193,16 +176,6 @@ function pageStarts(drawer: Drawer, count: number, budget: Size, last: number): 
   return starts
 }
 
-// What a row of pictures costs: its markup, and its share of the pictures
-// it may fill past a page's first. A picture ends before the row that would
-// take its markup or its height past the element's bounds, and a row takes
-// less than half of either, so every picture but the last holds at least
-// half of one; `each` is what a picture costs besides its rows.
-function pictureRowCost(markup: { chars: number; height: number }, each: Size): Size {
-  const share = markup.chars / (MAX_SOURCE_CHARS / 2) + markup.height / (MAX_PICTURE_PX / 2)
-  return { nodes: share * each.nodes, chars: markup.chars + share * each.chars, text: share * each.text }
-}
-
 function widthOf(rows: readonly Row[]): number {
   const most = rows.reduce(
     (top, row) => (row.kind === 'gap' ? top : Math.max(top, row.old ?? 0, row.new ?? 0)),
@@ -213,10 +186,6 @@ function widthOf(rows: readonly Row[]): number {
 
 const gutter = (n: number | undefined, width: number) =>
   (n === undefined ? '' : String(n)).padStart(width, NBSP) + NBSP
-
-// What a diffstat's squares say, for a reader that cannot see them.
-const diffstatAlt = (counts: { added: number; removed: number }) =>
-  `${plural(counts.added, 'line')} added, ${counts.removed} removed`
 
 // A path as its folder, drawn dim, and its file name.
 function splitPath(name: string): [string, string] {
@@ -325,10 +294,9 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
   const ui: Kit = { Box, Text, Button }
   const isTerminal = surface === 'terminal'
   // Every table names every element (one a surface lacks draws nothing), so
-  // the surface decides: the terminal draws rows, Desktop its own text where
-  // its Text takes `mono`, the other graphical surfaces pictures.
+  // the surface decides: the terminal draws rows and no pictures, a
+  // graphical surface its own text and the icons.
   const Svg = !isTerminal && 'Svg' in elements ? elements.Svg : undefined
-  const drawing: Drawing = Svg === undefined ? 'rows' : model.hasMonoText ? 'text' : 'pictures'
   // Hotkeys answer on the terminal; a desktop draws each as a badge on its
   // button, which crowds the toolbar.
   const hotkey = (key: string) => (isTerminal ? { hotkey: key } : {})
@@ -338,13 +306,11 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
     Svg === undefined ? null : <Svg alt={alt} source={icon.source} width={icon.width} height={icon.height} />
   const at = Math.min(now.at, Math.max(0, list.length - 1))
   const mode: DiffMode = now.mode ?? 'unified'
-  const canSplit = columns >= (drawing === 'pictures' ? MIN_SPLIT_COLUMNS_PICTURES : MIN_SPLIT_COLUMNS)
+  const canSplit = columns >= MIN_SPLIT_COLUMNS
   const isSplitView = mode === 'split' && canSplit
-  // Desktop's text cuts every line in split view: each side is a column of
+  // Off the terminal split view cuts every line: each side is a column of
   // rows one line high.
-  const canWrap = !(drawing === 'text' && isSplitView)
-  // The pictures span the card, inside its border.
-  const pictureWidth = Math.floor((columns - CARD_COLUMNS) * CELL_PX)
+  const canWrap = isTerminal || !isSplitView
   const wrap = canWrap && (now.wrap ?? true)
   const turn: TurnDiff | undefined = list[at]
 
@@ -363,6 +329,20 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
           </Box>
         </Box>
         <Box flexDirection="row">{refreshButton}</Box>
+      </Box>
+    )
+  }
+
+  // An engine whose Text has no `mono` would refuse the lines, and the pane
+  // with them.
+  if (!isTerminal && !model.hasMonoText) {
+    return (
+      <Box flexDirection="row" gap={1} alignItems="center">
+        {picture(warningIcon(), 'Warning')}
+        <Text color="warning">
+          This pane draws diffs on Claude Code {MONO_TEXT_SINCE.join('.')} or later, and this session runs an older
+          one. Update it to see them here.
+        </Text>
       </Box>
     )
   }
@@ -413,7 +393,7 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
   }
 
   const copyDiff = (file: FileDiff, where: RenderSurface) => {
-    const patch = patchOf(file.name, file.isNew, file.hunks)
+    const patch = unifiedDiff(file.name, file.isNew, file.hunks)
     return actions.copy(patch, copiedName(`the diff of ${file.name}`, patch), where)
   }
 
@@ -510,7 +490,7 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
         value={String(at)}
         options={list.map((one, index) => ({
           value: String(index),
-          label: `T${one.n} · ${titleIn(one)} · ${plural(one.files.length, 'file')}`,
+          label: `T${one.n} · ${one.title} · ${plural(one.files.length, 'file')}`,
         }))}
         onSelect={value => void go(Number(value))}
       />
@@ -546,7 +526,7 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
         <Box flexDirection="row" gap={1} alignItems="center">
           {picture(turnIcon(), 'Prompt')}
           <Text bold wrap="truncate-end">
-            T{turn.n} · {titleIn(turn)}
+            T{turn.n} · {turn.title}
           </Text>
         </Box>
         <Box flexDirection="row" gap={1} alignItems="center">
@@ -647,7 +627,7 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
     </Box>
   )
 
-  if (drawing === 'rows') {
+  if (isTerminal) {
     // The terminal pages each file by rows and by the characters a page
     // draws, and counts what every open page draws together.
     const paged = files.map(one => pagesOf(one.rows, one.width))
@@ -694,53 +674,34 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
   const drawerOf = (index: number) => (drawers[index] ??= drawerFor(index))
   function drawerFor(index: number): Drawer {
     const { file, rows, isSplit, width: digits, hunks } = files[index]!
-    if (drawing === 'text') {
-      // The hunk each row leads: the first row, and each gap row. A file of
-      // one hunk leaves it to the card's Copy diff.
-      const leads = new Map<number, number>()
-      rows.forEach((row, at) => {
-        if (at === 0 || row.kind === 'gap') leads.set(at, leads.size)
-      })
-      const hunkAt = (at: number): Copied | undefined => {
-        const k = leads.get(at)
-        if (k === undefined || hunks.length < 2 || leads.size !== hunks.length) return undefined
-        const hunk = `${hunks[k]!}\n`
-        return { text: hunk, what: copiedName(`hunk ${k + 1} of ${hunks.length}`, hunk) }
-      }
-      const text = textLines(ui, {
-        path: file.path,
-        digits,
-        isSplit,
-        isNew: file.isNew,
-        wrap,
-        card: index,
-        hunkAt,
-        copy: (copied, what, where) => void actions.copy(copied, what, where),
-      })
-      const built: TextRow[] = []
-      const rowAt = (at: number) => (built[at] ??= text.row(rows[at]!, at))
-      return {
-        frame: sizeOf(text.body([])),
-        costOf: at => rowAt(at).size,
-        bodyOf: (from, to) => text.body(rows.slice(from, to).map((_, k) => rowAt(from + k))),
-      }
+    // The hunk each row leads: the first row, and each gap row. A file of
+    // one hunk leaves it to the card's Copy diff.
+    const leads = new Map<number, number>()
+    rows.forEach((row, at) => {
+      if (at === 0 || row.kind === 'gap') leads.set(at, leads.size)
+    })
+    const hunkAt = (at: number): Copied | undefined => {
+      const k = leads.get(at)
+      if (k === undefined || hunks.length < 2 || leads.size !== hunks.length) return undefined
+      const hunk = `${hunks[k]!}\n`
+      return { text: hunk, what: copiedName(`hunk ${k + 1} of ${hunks.length}`, hunk) }
     }
-    const options: PictureOptions = { width: pictureWidth, wrap, path: file.path, digits, isSplit, isNew: file.isNew }
-    const pictures = (all: DiffPicture[]) => (
-      <Box flexDirection="column">
-        {all.map(one =>
-          Svg === undefined ? null : <Svg alt={`Diff of ${file.name}`} source={one.source} height={one.height} />,
-        )}
-      </Box>
-    )
-    // A page holds at least one picture.
-    const frame = sizeOf(pictures([pictureFrame(options)]))
-    const each = minus(frame, sizeOf(pictures([])))
-    const costs: Size[] = []
+    const text = textLines(ui, {
+      path: file.path,
+      digits,
+      isSplit,
+      isNew: file.isNew,
+      wrap,
+      card: index,
+      hunkAt,
+      copy: (copied, what, where) => void actions.copy(copied, what, where),
+    })
+    const built: TextRow[] = []
+    const rowAt = (at: number) => (built[at] ??= text.row(rows[at]!, at))
     return {
-      frame,
-      costOf: at => (costs[at] ??= pictureRowCost(markupOf(rows[at]!, options), each)),
-      bodyOf: (from, to) => pictures(diffPictures(rows.slice(from, to), options)),
+      frame: sizeOf(text.body([])),
+      costOf: at => rowAt(at).size,
+      bodyOf: (from, to) => text.body(rows.slice(from, to).map((_, k) => rowAt(from + k))),
     }
   }
 

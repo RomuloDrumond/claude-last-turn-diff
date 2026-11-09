@@ -14,6 +14,8 @@ export type Language = {
   blockComment?: readonly [string, string]
   quotes: string
   isCaseBlind?: boolean
+  // Names hold hyphens (`font-face`, `margin-left`), as CSS writes them.
+  isHyphenated?: boolean
 }
 
 const words = (text: string): ReadonlySet<string> => new Set(text.split(/\s+/).filter(Boolean))
@@ -76,6 +78,7 @@ const CSS: Language = {
   lineComments: [],
   blockComment: ['/*', '*/'],
   quotes: `'"`,
+  isHyphenated: true,
 }
 
 const SQL: Language = {
@@ -160,7 +163,7 @@ export function tokensOf(text: string, language: Language | undefined): Token[] 
     }
     if (isWordStart(ch)) {
       let to = at + 1
-      while (to < text.length && isWord(text[to]!)) to++
+      while (to < text.length && (isWord(text[to]!) || (language.isHyphenated === true && text[to] === '-'))) to++
       const word = text.slice(at, to)
       const key = language.isCaseBlind ? word.toLowerCase() : word
       let next = to
