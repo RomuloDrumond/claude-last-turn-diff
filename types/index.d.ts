@@ -21,6 +21,9 @@ export type FileDiff = {
 export type TurnDiff = {
   // The turn's number in the session, from 1 (drawn T<n>).
   n: number
+  // The engine's id of the turn, when the mod saw it run; a turn read back
+  // from the transcript has none.
+  id?: string
   // The prompt's first words.
   title: string
   files: FileDiff[]

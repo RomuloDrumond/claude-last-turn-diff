@@ -30,6 +30,14 @@
 // It never holds `$`: the hooks module reads the state, resolves the
 // elements and hands in what the buttons do, since an engine before 2.1.300
 // refuses a module that passes `$` into a function of another file.
+//
+// Every press, and every edit that lands while the pane is open, draws the
+// whole pane again. A drawing reads only the files it needs and marks the
+// changed words only of the lines it draws or measures (off the terminal,
+// every row of a turn it may list at once is measured), and what it works
+// out of a file's hunks is kept for the next drawing of the same hunks
+// (`kept`): its rows, the terminal's pages and what each row costs off the
+// terminal. Never an element: those are built anew, for the lines shown.
 
 import type { Color, Elements, RenderElement, RenderSurface } from 'claude-code'
 
@@ -37,7 +45,7 @@ import type { DiffMode, FileDiff, PaneView, TurnDiff } from '../types'
 import { hasCutLine, unifiedDiff } from './diff'
 import { diffstat, diffstatAlt, emptyPicture, fileIcon, newPill, squaresOf, turnIcon, warningIcon } from './icons'
 import type { Icon } from './icons'
-import { blocksOf, gapText, keepSpaces, plural, rowsIn, splitRowsOf } from './rows'
+import { blocksOf, gapText, keepSpaces, plural, rowsIn, splitRowsOf, wordMarker } from './rows'
 import type { Gap, Line, LineKind, Row, Span, SplitRow } from './rows'
 import { NOTHING, fits, minus, most, plus, sizeOf } from './size'
 import type { Size } from './size'
@@ -271,15 +279,68 @@ function splitRow(ui: Kit, row: SplitRow, look: Look) {
   )
 }
 
-// One file's rows, the digits of its largest line number, and the text of
-// each run of lines with no gap inside it, which a Copy hunk button copies.
-// A new file is all additions: split would leave its old side empty.
-function prepare(file: FileDiff, isSplitView: boolean) {
+// What a drawing works out of one file's hunks.
+type Prepared = {
+  // What it was worked out of.
+  hunks: readonly string[]
+  isNew: boolean
+  // Old lines beside new ones. A new file is all additions: split would
+  // leave its old side empty.
+  isSplit: boolean
+  rows: (Row | SplitRow)[]
+  // How many of the rows are lines.
+  lines: number
+  // The digits of the largest line number.
+  width: number
+  // The text of each run of lines with no gap inside it, which a Copy hunk
+  // button copies.
+  texts: string[]
+  // Marks the changed words of these rows' lines, which a drawing does
+  // before it draws or measures them.
+  mark: (rows: readonly (Row | SplitRow)[]) => void
+  // The terminal's pages, once a drawing asked for them.
+  pages?: (Row | SplitRow)[][]
+  // Off the terminal, what each row measured so far costs: drawn wrapped or
+  // cut, as this card of the turn.
+  costs?: { wrap: boolean; card: number; sizes: (Size | undefined)[] }
+}
+
+// What the drawings of the turn shown last worked out, by file and layout.
+// Another turn empties it, and a file whose hunks changed is read again.
+const kept = { turn: '', files: new Map<string, Prepared>() }
+
+const sameHunks = (a: readonly string[], b: readonly string[]) =>
+  a.length === b.length && a.every((hunk, at) => hunk === b[at])
+
+function prepare(file: FileDiff, isSplitView: boolean): Prepared {
+  const isSplit = isSplitView && !file.isNew
+  const key = `${isSplit ? 'split' : 'unified'} ${file.key}`
+  const was = kept.files.get(key)
+  if (was !== undefined && was.isNew === file.isNew && sameHunks(was.hunks, file.hunks)) return was
+
   const blocks = blocksOf(file.hunks)
   const unified = rowsIn(blocks)
-  const isSplit = isSplitView && !file.isNew
   const rows: (Row | SplitRow)[] = isSplit ? splitRowsOf(unified) : unified
-  return { file, rows, isSplit, width: widthOf(unified), hunks: blocks.map(block => block.text) }
+  let marker: ((line: Line) => void) | undefined
+  const made: Prepared = {
+    hunks: file.hunks,
+    isNew: file.isNew,
+    isSplit,
+    rows,
+    lines: lineCount(rows),
+    width: widthOf(unified),
+    texts: blocks.map(block => block.text),
+    mark: shown => {
+      const mark = (marker ??= wordMarker(unified))
+      for (const row of shown) {
+        if (row.kind === 'gap') continue
+        if (row.kind !== 'pair') mark(row)
+        else for (const line of [row.left, row.right]) if (line !== undefined) mark(line)
+      }
+    },
+  }
+  kept.files.set(key, made)
+  return made
 }
 
 // How a toast names text copied from hunks, saying when their long lines
@@ -347,13 +408,24 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
     )
   }
 
-  const files = turn.files.map(file => prepare(file, isSplitView))
+  const stamp = `${turn.n} ${turn.id ?? ''} ${turn.title}`
+  if (kept.turn !== stamp) {
+    kept.turn = stamp
+    kept.files.clear()
+  }
+  // Each file as prepared, read when a drawing first needs it.
+  const { files } = turn
+  const count = files.length
+  const prepared: Prepared[] = []
+  const fileAt = (index: number) => (prepared[index] ??= prepare(files[index]!, isSplitView))
+  // Counted file by file, until the turn is past what it lists at once.
+  let listedRows = 0
   const isTooLargeToList =
-    files.length > 1 &&
-    (files.length > MAX_LISTED_FILES || files.reduce((sum, one) => sum + lineCount(one.rows), 0) > MAX_TURN_ROWS)
-  const current = Math.min(now.file ?? 0, files.length - 1)
+    count > 1 &&
+    (count > MAX_LISTED_FILES || files.some((_, index) => (listedRows += fileAt(index).lines) > MAX_TURN_ROWS))
+  const current = Math.min(now.file ?? 0, count - 1)
   const isOpen = (file: FileDiff) => !now.toggled.includes(file.key)
-  const isAllOpen = turn.files.every(isOpen)
+  const isAllOpen = files.every(isOpen)
 
   const go = (to: number) =>
     actions.change(was => ({
@@ -380,9 +452,9 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
     await actions.remember(WRAP_KEY, !wrap)
   }
   const showFile = (to: number) =>
-    actions.change(was => ({ ...was, file: Math.max(0, Math.min(to, files.length - 1)) }))
+    actions.change(was => ({ ...was, file: Math.max(0, Math.min(to, count - 1)) }))
   const jumpTo = async (index: number, isTooLarge: boolean) => {
-    const target = turn.files[index]
+    const target = files[index]
     if (target === undefined) return
     await actions.change(was => ({
       ...was,
@@ -400,14 +472,14 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
   // Said in place of a card's lines when the pane has no room left for them.
   const notice = (index: number, isTooLarge: boolean) => (
     <Text dimColor>
-      {!isTooLarge && files.some((one, other) => other !== index && isOpen(one.file))
+      {!isTooLarge && files.some((file, other) => other !== index && isOpen(file))
         ? 'Too much is open to draw this file here: collapse another file first.'
         : "This file's lines are too large to draw here."}
     </Text>
   )
 
   const card = (index: number, shown: Shown | undefined, isTooLarge: boolean) => {
-    const { file, rows } = files[index]!
+    const file = files[index]!
     const open = shown !== undefined
     const squares = squaresOf(file.added, file.removed)
     const [folder, base] = splitPath(file.name)
@@ -470,7 +542,7 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
             />
             <Text dimColor>
               {shown.firstLine}–{shown.lastLine} of{' '}
-              {lineCount(rows)} lines
+              {fileAt(index).lines} lines
             </Text>
             <Button
               key={`later-${index}`}
@@ -499,14 +571,14 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
   // The jump list, at file `alone`: every file, or, past what a Select
   // holds, those around that one.
   const jump = (isTooLarge: boolean, alone: number) => {
-    if (Select === undefined || files.length <= 1) return null
-    const first = Math.max(0, Math.min(alone - MAX_OPTIONS / 2, files.length - MAX_OPTIONS))
+    if (Select === undefined || count <= 1) return null
+    const first = Math.max(0, Math.min(alone - MAX_OPTIONS / 2, count - MAX_OPTIONS))
     return (
       <Select
         key="jump"
         label="Jump to file"
         value={String(alone)}
-        options={turn.files.slice(first, first + MAX_OPTIONS).map((file, index) => ({
+        options={files.slice(first, first + MAX_OPTIONS).map((file, index) => ({
           value: String(first + index),
           label: `${shortPath(file.name)}  +${file.added} −${file.removed}`,
         }))}
@@ -531,7 +603,7 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
         </Box>
         <Box flexDirection="row" gap={1} alignItems="center">
           <Text>
-            {plural(turn.files.length, 'file')} changed{'  '}
+            {plural(files.length, 'file')} changed{'  '}
             <Text color="success">+{turn.added}</Text> <Text color="error">−{turn.removed}</Text>
           </Text>
           {picture(diffstat(turn.added, turn.removed), diffstatAlt(turn))}
@@ -577,7 +649,7 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
               onPress={() => void switchWrap()}
             />
           )}
-          {!isTooLarge && files.length > 1 && (
+          {!isTooLarge && count > 1 && (
             <Button
               key="all"
               label={isAllOpen ? named('⊟', 'Collapse all') : named('⊞', 'Expand all')}
@@ -585,7 +657,7 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
               onPress={() =>
                 void actions.change(was => ({
                   ...was,
-                  toggled: isAllOpen ? turn.files.map(file => file.key) : [],
+                  toggled: isAllOpen ? files.map(file => file.key) : [],
                 }))
               }
             />
@@ -610,7 +682,7 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
               onPress={() => void showFile(alone - 1)}
             />
             <Text dimColor>
-              File {alone + 1} of {files.length}
+              File {alone + 1} of {count}
             </Text>
             <Button
               key="next-file"
@@ -630,18 +702,26 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
   if (isTerminal) {
     // The terminal pages each file by rows and by the characters a page
     // draws, and counts what every open page draws together.
-    const paged = files.map(one => pagesOf(one.rows, one.width))
+    const pagesAt = (index: number) => {
+      const one = fileAt(index)
+      return (one.pages ??= pagesOf(one.rows, one.width))
+    }
+    let firstPages = 0
     const isTooLarge =
       isTooLargeToList ||
-      (files.length > 1 &&
-        files.reduce((sum, one, index) => sum + charsOf(paged[index]![0] ?? [], one.width), 0) > MAX_DRAWN_CHARS)
+      (count > 1 &&
+        files.some(
+          (_, index) => (firstPages += charsOf(pagesAt(index)[0] ?? [], fileAt(index).width)) > MAX_DRAWN_CHARS,
+        ))
     let chars = MAX_DRAWN_CHARS
     let drawnRows = MAX_DRAWN_ROWS
     const shown: (Shown | undefined)[] = []
     for (const index of drawnCards(isTooLarge, current)) {
-      const { file, isSplit, width } = files[index]!
-      const pages = paged[index]!
+      const file = files[index]!
       if (!isTooLarge && !isOpen(file)) continue
+      const one = fileAt(index)
+      const { isSplit, width } = one
+      const pages = pagesAt(index)
       const page = Math.max(0, Math.min(now.pages[file.key] ?? 0, pages.length - 1))
       const lines = pages[page] ?? []
       const size = charsOf(lines, width)
@@ -649,6 +729,7 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
       if (isRoomy) {
         chars -= size
         drawnRows -= lines.length
+        one.mark(lines)
       }
       const look: Look = { width, wrap }
       shown[index] = {
@@ -673,7 +754,9 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
   const drawers: Drawer[] = []
   const drawerOf = (index: number) => (drawers[index] ??= drawerFor(index))
   function drawerFor(index: number): Drawer {
-    const { file, rows, isSplit, width: digits, hunks } = files[index]!
+    const file = files[index]!
+    const one = fileAt(index)
+    const { rows, isSplit, width: digits, texts: hunks } = one
     // The hunk each row leads: the first row, and each gap row. A file of
     // one hunk leaves it to the card's Copy diff.
     const leads = new Map<number, number>()
@@ -696,18 +779,33 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
       hunkAt,
       copy: (copied, what, where) => void actions.copy(copied, what, where),
     })
+    // A row costs the same drawn again the same way: only the rows a page
+    // shows, and those never measured, are built.
+    if (one.costs === undefined || one.costs.wrap !== wrap || one.costs.card !== index) {
+      one.costs = { wrap, card: index, sizes: [] }
+    }
+    const { sizes } = one.costs
     const built: TextRow[] = []
-    const rowAt = (at: number) => (built[at] ??= text.row(rows[at]!, at))
+    const rowAt = (at: number) => {
+      const was = built[at]
+      if (was !== undefined) return was
+      const row = rows[at]!
+      one.mark([row])
+      const made = text.row(row, at)
+      built[at] = made
+      sizes[at] = made.size
+      return made
+    }
     return {
       frame: sizeOf(text.body([])),
-      costOf: at => rowAt(at).size,
+      costOf: at => sizes[at] ?? rowAt(at).size,
       bodyOf: (from, to) => text.body(rows.slice(from, to).map((_, k) => rowAt(from + k))),
     }
   }
 
   // A card open with its pager at its widest and no lines.
   const bare = (index: number): Shown => {
-    const total = lineCount(files[index]!.rows)
+    const total = fileAt(index).lines
     return { page: 0, isPaged: true, firstLine: total, lastLine: total, body: null }
   }
 
@@ -719,7 +817,7 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
 
   // A card open at page `wanted`, or at its last page when it has fewer.
   const shownAt = (index: number, wanted: number): Shown => {
-    const { rows } = files[index]!
+    const { rows } = fileAt(index)
     const drawer = drawerOf(index)
     const starts = pageStarts(drawer, rows.length, budgetOf(index), wanted)
     const page = Math.max(0, Math.min(wanted, starts.length - 1))
@@ -736,7 +834,7 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
 
   // The most any page of a file takes, measure by measure.
   const largestPage = (index: number) => {
-    const { rows } = files[index]!
+    const { rows } = fileAt(index)
     const drawer = drawerOf(index)
     const starts = pageStarts(drawer, rows.length, budgetOf(index), Infinity)
     let largest = NOTHING
@@ -752,14 +850,17 @@ export function paneTree(elements: Elements[RenderSurface], model: PaneModel, ac
   // at its largest page.
   const isTooLarge =
     isTooLargeToList ||
-    (files.length > 1 &&
-      !fits(files.reduce((sum, _, index) => plus(sum, largestPage(index)), sizeOf(paneOf(false, bare))), PANE_BUDGET))
+    (count > 1 &&
+      !fits(
+        files.reduce((sum, _, index) => plus(sum, largestPage(index)), sizeOf(paneOf(false, bare))),
+        PANE_BUDGET,
+      ))
 
   // Each open card's page; then, card by card, the lines while the pane has
   // room for them, and what is said in their place past that.
   const shown: (Shown | undefined)[] = []
   for (const index of drawnCards(isTooLarge, current)) {
-    const { file } = files[index]!
+    const file = files[index]!
     if (isTooLarge || isOpen(file)) shown[index] = shownAt(index, now.pages[file.key] ?? 0)
   }
   const said = (index: number): Shown | undefined => {

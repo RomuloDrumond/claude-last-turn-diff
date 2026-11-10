@@ -1,12 +1,12 @@
-import type { On, SessionMessage } from 'claude-code'
+import type { AgentInfo, On, SessionMessage } from 'claude-code'
 import { describe, expect, mock, test } from 'claude-code/testing'
 import type { Engine, Mounted } from 'claude-code/testing'
 
 import type { Elements } from 'claude-code'
 
-import { unifiedHunks } from '../hooks/diff'
+import { unifiedHunks, unplacedHunks } from '../hooks/diff'
 import { diffstat, fileIcon, squaresOf } from '../hooks/icons'
-import { blocksOf, rowsIn, rowsOf, splitRowsOf, wordSpans } from '../hooks/rows'
+import { blocksOf, rowsIn, rowsOf, splitRowsOf, wordMarker, wordSpans } from '../hooks/rows'
 import { sizeOf } from '../hooks/size'
 import { languageOf, tokensOf } from '../hooks/syntax'
 import { titleOf, turnOf } from '../hooks/turns'
@@ -61,6 +61,10 @@ const SOURCE = ['export function answer() {', '  return 1', '}', ''].join('\n')
 
 type World = {
   messages?: SessionMessage[]
+  // The agents' own conversations, by agent id; any other agent's is denied.
+  agentMessages?: Record<string, SessionMessage[]>
+  // What `$.agent.list()` answers.
+  agents?: AgentInfo[]
   deny?: string
   // What `$.session.version()` answers; null, no answer at all.
   version?: { version: string; base?: string } | null
@@ -79,7 +83,13 @@ function world(on: On, options: World = {}) {
   if (version !== null) on('session.version', () => ({ value: version }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.cwd', () => ({ value: '/work' }))
-  on('session.messages', () => ({ value: options.messages ?? [] }))
+  on('session.messages', (_$, e) => ({
+    value:
+      e.agentId === undefined
+        ? (options.messages ?? [])
+        : (options.agentMessages?.[e.agentId] ?? { deny: `no conversation of agent ${e.agentId}` }),
+  }))
+  on('agent.list', () => ({ value: options.agents ?? [] }))
   on('command.register', (_$, e) => ({ value: { command: e.name } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('ui.toast', (_$, e) => {
@@ -748,8 +758,281 @@ describe('last-turn-diff', () => {
     expect(await shown(ui)).toContain('2 files changed')
   })
 
-  // The transcript holds the main loop's edits only: its turn is the live
-  // one, which has a subagent's file too.
+  // A background agent outlives the turn that started it.
+  const agentStart = ($: Engine, agentId: string) => $.turn.start({ text: 'work in the background', turnId: `run-${agentId}`, agentId })
+  const agentEnd = ($: Engine, agentId: string) =>
+    $.turn.complete({ answer: 'Finished.', durationMs: 5, isAborted: false, turnId: `run-${agentId}`, reason: 'answer', agentId })
+  // The kit hands the hooks the loop a call names, as the engine does for an
+  // agent's own calls; the call's type leaves it out.
+  const agentWrite = ($: Engine, agentId: string, path: string, content: string) =>
+    $.tool.call({ tool: 'Write', file_path: path, content, agentId } as Parameters<Engine['tool']['call']>[0])
+
+  test("an agent's edit after its turn completed goes to that turn, not the next", async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 1, 'start a helper and edit', async () => {
+      await agentStart($, 'helper')
+      await editAnswer($)
+    })
+    const hint = await mount($, { ...BAND, surface: 'terminal' })
+    expect(await shown(hint)).toMatch(/Last turn changed 1 file/)
+    // Between the turns: the turn's diff and the hint take it in.
+    await agentWrite($, 'helper', '/work/early.md', 'early\n')
+    expect(await shown(hint)).toMatch(/Last turn changed 2 files/)
+    await hint.unmount()
+    // During the next turn: still the first turn's.
+    await turn($, 2, 'something else', async () => {
+      await write($, '/work/other.md', 'other\n')
+      await agentWrite($, 'helper', '/work/late.md', 'late\n')
+    })
+    await agentEnd($, 'helper')
+
+    const ui = await mount($, { ...PANE, surface: 'terminal' })
+    expect(await shown(ui)).toContain('T2 · something else')
+    expect(await shown(ui)).toContain('1 file changed')
+    expect(await shown(ui)).not.toContain('late.md')
+    await ui.press({ key: 'prev' })
+    expect(await shown(ui)).toContain('T1 · start a helper and edit')
+    expect(await shown(ui)).toContain('3 files changed')
+    expect(await shown(ui)).toContain('late.md')
+    // Its run over, the agent is one nobody saw start: between turns, its
+    // edit goes to the turn that completed last, not to the next.
+    await agentWrite($, 'helper', '/work/stray.md', 'stray\n')
+    await turn($, 3, 'a third', async () => {})
+    await ui.press({ key: 'next' })
+    expect(await shown(ui)).toContain('T2 · something else')
+    expect(await shown(ui)).toContain('2 files changed')
+    expect(await shown(ui)).toContain('stray.md')
+    expect(await shown(ui)).toContain('turn 1 of 2 with edits')
+  })
+
+  test("an agent another agent started works for that agent's turn, whichever turn runs", async ($, on) => {
+    world(on, { agents: [{ id: 'inner', parentId: 'outer', description: 'notes', type: 'general-purpose', status: 'running' }] })
+    await start($)
+    await turn($, 1, 'start a helper', () => agentStart($, 'outer'))
+    await turn($, 2, 'something else', async () => {
+      await write($, '/work/other.md', 'other\n')
+      await agentStart($, 'inner')
+      await agentWrite($, 'inner', '/work/inner.md', 'inner\n')
+    })
+
+    const ui = await mount($, { ...PANE, surface: 'terminal' })
+    expect(await shown(ui)).toContain('T2 · something else')
+    expect(await shown(ui)).not.toContain('inner.md')
+    await ui.press({ key: 'prev' })
+    expect(await shown(ui)).toContain('T1 · start a helper')
+    expect(await shown(ui)).toContain('inner.md')
+  })
+
+  test("a late edit brings in a turn that had none, and the pane stays on the turn it shows", async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 1, 'first edit', () => editAnswer($))
+    await turn($, 2, 'only start a helper', () => agentStart($, 'helper'))
+    await turn($, 3, 'third edit', () => write($, '/work/third.md', 'third\n'))
+
+    const ui = await mount($, { ...PANE, surface: 'terminal' })
+    await ui.press({ key: 'prev' })
+    expect(await shown(ui)).toContain('T1 · first edit')
+    expect(await shown(ui)).toContain('turn 2 of 2 with edits')
+    await agentWrite($, 'helper', '/work/notes.md', '# Notes\n')
+    expect(await shown(ui)).toContain('T1 · first edit')
+    expect(await shown(ui)).toContain('turn 3 of 3 with edits')
+    await ui.press({ key: 'next' })
+    expect(await shown(ui)).toContain('T2 · only start a helper')
+    expect(await shown(ui)).toContain('notes.md')
+    // The hint is the last turn's, which the late edit did not touch.
+    const after = await mount($, { ...BAND, surface: 'terminal' })
+    expect(await shown(after)).toMatch(/Last turn changed 1 file/)
+  })
+
+  // The pane keeps what it worked out of a file's hunks between drawings.
+  test('a redraw draws what a first drawing does, and reads a file again once an edit changed it', async ($, on) => {
+    world(on)
+    await start($)
+    const table = numberTable(8, 60)
+    await turn($, 1, 'write a table', () => write($, '/work/table.ts', table.before))
+    await turn($, 2, 'start a helper and change the table', async () => {
+      await agentStart($, 'helper')
+      await write($, '/work/table.ts', table.after)
+      await editAnswer($)
+    })
+    // A tree as data: what it draws, not which handler each press reaches.
+    const plain = (tree: unknown) => JSON.stringify(tree, (key, value) => (key === 'handle' ? 0 : value))
+    // Another turn shown empties what is kept: back on this one, the drawing is a first one.
+    const fresh = async (ui: Drawn) => {
+      await ui.press({ key: 'prev' })
+      await ui.press({ key: 'next' })
+      return plain(await ui.drawn())
+    }
+
+    for (const surface of SURFACES) {
+      const ui = await mountOn($, surface)
+      const first = await fresh(ui)
+      await ui.press({ key: 'wrap' })
+      const cut = plain(await ui.drawn())
+      expect(await fresh(ui)).toBe(cut)
+      await ui.press({ key: 'wrap' })
+      expect(plain(await ui.drawn())).toBe(first)
+      await ui.press({ key: 'mode' })
+      const split = plain(await ui.drawn())
+      expect(await fresh(ui)).toBe(split)
+      await ui.press({ key: 'mode' })
+      expect(plain(await ui.drawn())).toBe(first)
+
+      // The helper rewrites the table after its turn: the redraw shows it.
+      await agentWrite($, 'helper', '/work/table.ts', surface === 'terminal' ? `${table.before}// once\n` : `${table.before}// twice\n`)
+      const late = plain(await ui.drawn())
+      expect(late).not.toBe(first)
+      expect(await shown(ui)).toContain(surface === 'terminal' ? '// once' : '// twice')
+      expect(await fresh(ui)).toBe(late)
+      await ui.unmount()
+    }
+  })
+
+  for (const isEditFirst of [true, false]) {
+    test(`a late edit that lands as another turn completes leaves the pane on the new turn (${isEditFirst ? 'the edit' : 'the end'} first)`, async ($, on) => {
+      world(on)
+      await start($)
+      await turn($, 1, 'first edit', async () => {
+        await agentStart($, 'helper')
+        await editAnswer($)
+      })
+      await turn($, 2, 'second', () => write($, '/work/second.md', 'second\n'))
+      const ui = await mount($, { ...PANE, surface: 'terminal' })
+      await ui.press({ key: 'prev' })
+      expect(await shown(ui)).toContain('T1 · first edit')
+
+      await $.turn.start({ text: 'third', turnId: 'turn-3' })
+      await write($, '/work/third.md', 'third\n')
+      const late = () => agentWrite($, 'helper', '/work/late.md', 'late\n')
+      const end = () => $.turn.complete({ answer: 'Done.', durationMs: 10, isAborted: false, turnId: 'turn-3', reason: 'answer' })
+      await Promise.all(isEditFirst ? [late(), end()] : [end(), late()])
+
+      expect(await shown(ui)).toContain('T3 · third')
+      expect(await shown(ui)).toContain('turn 1 of 3 with edits')
+      await ui.press({ key: 'prev' })
+      await ui.press({ key: 'prev' })
+      expect(await shown(ui)).toContain('T1 · first edit')
+      expect(await shown(ui)).toContain('late.md')
+    })
+  }
+
+  // A session start that is neither /clear, /resume nor a fork.
+  test('a compaction leaves a running agent with its turn', async ($, on) => {
+    world(on)
+    await start($)
+    await turn($, 1, 'start a helper and edit', async () => {
+      await agentStart($, 'helper')
+      await editAnswer($)
+    })
+    await $.classic.SessionStart({ source: 'compact' })
+    await agentWrite($, 'helper', '/work/late.md', 'late\n')
+    await $.turn.start({ text: 'the next turn', turnId: 'turn-2' })
+    await $.classic.SessionStart({ source: 'compact' })
+    await write($, '/work/next.md', 'next\n')
+    await $.turn.complete({ answer: 'Done.', durationMs: 10, isAborted: false, turnId: 'turn-2', reason: 'answer' })
+
+    const ui = await mount($, { ...PANE, surface: 'terminal' })
+    expect(await shown(ui)).toContain('T2 · the next turn')
+    expect(await shown(ui)).toContain('next.md')
+    expect(await shown(ui)).not.toContain('late.md')
+    await ui.press({ key: 'prev' })
+    expect(await shown(ui)).toContain('T1 · start a helper and edit')
+    expect(await shown(ui)).toContain('late.md')
+  })
+
+  test('a turn this copy of the mod did not see start is read back from the transcript when it completes', async ($, on) => {
+    const messages: SessionMessage[] = []
+    world(on, { messages })
+    await start($)
+    messages.push(
+      { role: 'user', text: 'first edit', toolUses: [] },
+      {
+        role: 'assistant',
+        text: '',
+        toolUses: [
+          {
+            tool_use_id: 'use-1',
+            tool: 'Edit',
+            input: { file_path: '/work/src/answer.ts', old_string: '  return 1', new_string: '  return 42' },
+            result: { filePath: '/work/src/answer.ts', originalFile: SOURCE, oldString: '  return 1', newString: '  return 42' },
+            text: 'ok',
+          },
+        ],
+      },
+    )
+    await $.turn.complete({ answer: 'Done.', durationMs: 10, isAborted: false, turnId: 'turn-1', reason: 'answer' })
+
+    const ui = await mount($, { ...PANE, surface: 'terminal' })
+    expect(await shown(ui)).toContain('T1 · first edit')
+    expect(await shown(await mount($, { ...BAND, surface: 'terminal' }))).toMatch(/Last turn changed 1 file/)
+  })
+
+  test('an edit that lands before this copy of the mod saw a turn goes to the next turn', async ($, on) => {
+    world(on)
+    await start($)
+    // The mod reloaded mid-turn: an agent it never saw start edits, then
+    // the turn it never saw start completes, and the transcript holds neither.
+    await agentWrite($, 'helper', '/work/late.md', 'late\n')
+    await $.turn.complete({ answer: 'Done.', durationMs: 10, isAborted: false, turnId: 'turn-0', reason: 'answer' })
+    await turn($, 1, 'the next turn', async () => {})
+
+    const ui = await mount($, { ...PANE, surface: 'terminal' })
+    expect(await shown(ui)).toContain('T1 · the next turn')
+    expect(await shown(ui)).toContain('late.md')
+  })
+
+  test('a turn with no diff yet moves with its neighbours when Refresh numbers the turns anew', async ($, on) => {
+    const messages: SessionMessage[] = []
+    world(on, { messages })
+    await start($)
+    await turn($, 1, 'first edit', () => editAnswer($))
+    await turn($, 2, 'only start a helper', () => agentStart($, 'helper'))
+    messages.push(
+      { role: 'user', text: 'old prompt', toolUses: [] },
+      {
+        role: 'assistant',
+        text: '',
+        toolUses: [
+          {
+            tool_use_id: 'use-0',
+            tool: 'Write',
+            input: { file_path: '/work/old.md', content: 'old\n' },
+            result: { type: 'create', filePath: '/work/old.md', content: 'old\n', structuredPatch: [] },
+            text: 'ok',
+          },
+        ],
+      },
+      { role: 'user', text: 'first edit', toolUses: [] },
+      {
+        role: 'assistant',
+        text: '',
+        toolUses: [
+          {
+            tool_use_id: 'use-1',
+            tool: 'Edit',
+            input: { file_path: '/work/src/answer.ts', old_string: '  return 1', new_string: '  return 42' },
+            result: { filePath: '/work/src/answer.ts', originalFile: SOURCE, oldString: '  return 1', newString: '  return 42' },
+            text: 'ok',
+          },
+        ],
+      },
+      { role: 'user', text: 'only start a helper', toolUses: [] },
+    )
+
+    const ui = await mount($, { ...PANE, surface: 'terminal' })
+    await ui.press({ key: 'refresh' })
+    expect(await shown(ui)).toContain('T2 · first edit')
+    await agentWrite($, 'helper', '/work/late.md', 'late\n')
+    expect(await shown(ui)).toContain('T2 · first edit')
+    await ui.press({ key: 'next' })
+    expect(await shown(ui)).toContain('T3 · only start a helper')
+    expect(await shown(ui)).toContain('turn 1 of 3 with edits')
+    expect(await shown(await mount($, { ...BAND, surface: 'terminal' }))).toMatch(/Last turn changed 1 file/)
+  })
+
+  // The transcript read back here holds one file of the turn's two.
   test('Refresh keeps a turn recorded live with more files than the transcript holds', async ($, on) => {
     const messages: SessionMessage[] = []
     world(on, { messages })
@@ -786,7 +1069,10 @@ describe('last-turn-diff', () => {
     world(on, { messages })
     await start($)
     await turn($, 1, 'first edit', () => editAnswer($))
-    await turn($, 2, 'second file', () => write($, '/work/notes.md', '# Notes\n'))
+    await turn($, 2, 'second file', async () => {
+      await agentStart($, 'helper')
+      await write($, '/work/notes.md', '# Notes\n')
+    })
     const prompt = (text: string): SessionMessage => ({ role: 'user', text, toolUses: [] })
     const wrote = (path: string, content: string): SessionMessage => ({
       role: 'assistant',
@@ -828,6 +1114,16 @@ describe('last-turn-diff', () => {
     await ui.press({ key: 'refresh' })
     expect(await shown(ui)).toContain('T2 · first edit')
     expect(await shown(ui)).toContain('turn 2 of 3 with edits')
+
+    // An agent's late edit finds its turn under its new number, and the
+    // hint, which is that turn's, takes it in.
+    await agentWrite($, 'helper', '/work/late.md', 'late\n')
+    expect(await shown(ui)).toContain('T2 · first edit')
+    await ui.press({ key: 'next' })
+    expect(await shown(ui)).toContain('T3 · second file')
+    expect(await shown(ui)).toContain('2 files changed')
+    expect(await shown(ui)).toContain('turn 1 of 3 with edits')
+    expect(await shown(await mount($, { ...BAND, surface: 'terminal' }))).toMatch(/Last turn changed 2 files/)
   })
 })
 
@@ -1030,6 +1326,133 @@ describe("the pane's controls", () => {
     const ui = await mount($, { ...PANE, surface: 'desktop' })
     expect(await shown(ui)).toContain('T1 · old prompt')
     expect(await shown(ui)).toContain('  return 7')
+  })
+
+  // An agent's conversation stores what the model gave each call and read
+  // back, and no record of the file around it.
+  test("the turns read back hold the edits of the agents each turn started", async ($, on) => {
+    const said = (text: string, toolUses: SessionMessage['toolUses'] = []): SessionMessage => ({ role: 'assistant', text, toolUses })
+    const agent = (id: string, text: string, agentId?: string): SessionMessage['toolUses'][number] => ({
+      tool_use_id: `use-${id}`,
+      tool: 'Agent',
+      input: { description: id, prompt: 'write the notes' },
+      text,
+      ...(agentId !== undefined ? { agentId } : {}),
+    })
+    const wrote = (path: string, content: string): SessionMessage['toolUses'][number] => ({
+      tool_use_id: `use-${path}`,
+      tool: 'Write',
+      input: { file_path: path, content },
+      text: `File created successfully at: ${path}`,
+    })
+    const edited = (path: string, old_string: string, new_string: string, isError = false): SessionMessage['toolUses'][number] => ({
+      tool_use_id: `use-${path}-${new_string}`,
+      tool: 'Edit',
+      input: { file_path: path, old_string, new_string },
+      text: isError ? 'String to replace not found in file.' : `The file ${path} has been updated successfully.`,
+      ...(isError ? { isError: true as const } : {}),
+    })
+    world(on, {
+      messages: [
+        { role: 'user', text: 'ask a helper', toolUses: [] },
+        said('', [
+          agent('helper', 'Written.', 'helper'),
+          agent('gone', 'Async agent launched successfully.', 'gone'),
+          agent('refused', 'No agent started.'),
+        ]),
+        said('Done.'),
+      ],
+      agentMessages: {
+        helper: [
+          { role: 'user', text: 'write the notes', toolUses: [] },
+          said('', [wrote('/work/notes.md', '# Notes\n\nfirst draft\n')]),
+          said('', [edited('/work/notes.md', 'first draft', 'second draft')]),
+          said('', [edited('/work/lib.ts', 'const old = 1', 'const renamed = 1')]),
+          said('', [edited('/work/lib.ts', 'not there', 'never landed', true)]),
+          // An agent's own conversation names the agent it started only in
+          // what the call answered.
+          said('', [agent('inner', 'Done.\nagentId: inner (use SendMessage with to: "inner" to continue this agent)')]),
+        ],
+        inner: [
+          { role: 'user', text: 'one more file', toolUses: [] },
+          said('', [wrote('/work/inner.md', 'inner\n')]),
+        ],
+      },
+    })
+    await start($)
+
+    const ui = await mount($, { ...PANE, surface: 'terminal' })
+    const text = await shown(ui)
+    expect(text).toContain('T1 · ask a helper')
+    expect(text).toContain('3 files changed')
+    // The file the agent made and then edited, as the two left it.
+    expect(text).toContain('second draft')
+    expect(text).not.toContain('first draft')
+    expect(text).not.toContain('each edit shown in turn')
+    // An edit of a file nobody read: the change itself, its lines not numbered.
+    expect(text).toContain('⋯ somewhere in the file')
+    expect(text).toMatch(/^ {6}− const old = 1$/m)
+    expect(text).toMatch(/^ {6}\+ const renamed = 1$/m)
+    expect(await marked(ui, 'diffRemovedWord')).toEqual(['old'])
+    expect(text).not.toContain('never landed')
+    expect(text).toContain('inner.md')
+
+    const desktop = await mount($, { ...PANE, surface: 'desktop' })
+    expect(await codeLines(desktop)).toContain('const renamed = 1')
+  })
+
+  // A background agent's calls stand where its Agent call does, though they
+  // landed after the main loop's next edit of the same file.
+  test("an agent's edit that landed after the main loop's later one is still shown", async ($, on) => {
+    const lines = ['a = 1', 'b = 2', 'c = 3', '']
+    const first = lines.join('\n')
+    const second = first.replace('a = 1', 'a = 10')
+    const edit = (id: string, before: string, old_string: string, new_string: string): SessionMessage['toolUses'][number] => ({
+      tool_use_id: id,
+      tool: 'Edit',
+      input: { file_path: '/work/conf.py', old_string, new_string },
+      result: { filePath: '/work/conf.py', originalFile: before, oldString: old_string, newString: new_string },
+      text: 'ok',
+    })
+    world(on, {
+      messages: [
+        { role: 'user', text: 'edit with a helper', toolUses: [] },
+        { role: 'assistant', text: '', toolUses: [edit('use-1', first, 'a = 1', 'a = 10')] },
+        {
+          role: 'assistant',
+          text: '',
+          toolUses: [{ tool_use_id: 'use-2', tool: 'Agent', input: { prompt: 'change c' }, text: 'Async agent launched successfully.', agentId: 'helper' }],
+        },
+        // The main loop read the file before the agent's edit landed.
+        { role: 'assistant', text: '', toolUses: [edit('use-3', second, 'b = 2', 'b = 20')] },
+      ],
+      agentMessages: {
+        helper: [
+          { role: 'user', text: 'change c', toolUses: [] },
+          {
+            role: 'assistant',
+            text: '',
+            toolUses: [
+              {
+                tool_use_id: 'use-9',
+                tool: 'Edit',
+                input: { file_path: '/work/conf.py', old_string: 'c = 3', new_string: 'c = 30' },
+                text: 'The file /work/conf.py has been updated successfully.',
+              },
+            ],
+          },
+        ],
+      },
+    })
+    await start($)
+
+    const ui = await mount($, { ...PANE, surface: 'terminal' })
+    const text = await shown(ui)
+    expect(text).toContain('each edit shown in turn')
+    expect(text).toContain('+3 −3')
+    expect(text).toMatch(/^ {6}\+ c = 30$/m)
+    expect(text).toMatch(/\+ a = 10$/m)
+    expect(text).toMatch(/\+ b = 20$/m)
   })
 })
 
@@ -1237,7 +1660,10 @@ describe('rows', () => {
     const blocks = blocksOf(hunks)
     expect(blocks.length).toBe(1)
     expect(blocks[0]!.text).toBe(hunks.join('\n'))
-    const added = rowsIn(blocks).filter(row => row.kind === 'added')
+    const rows = rowsIn(blocks)
+    const mark = wordMarker(rows)
+    for (const row of rows) if (row.kind !== 'gap') mark(row)
+    const added = rows.filter(row => row.kind === 'added')
     expect(added.length).toBe(300)
     for (const row of added) {
       expect(row.kind === 'added' && row.spans).toEqual([
@@ -1245,6 +1671,37 @@ describe('rows', () => {
         { text: '!', isChanged: true },
       ])
     }
+  })
+
+  test('a hunk with no place in the file is a block of its own, whole and set apart', () => {
+    const many = Array.from({ length: 250 }, (_, i) => `value ${i}`)
+    const long = unplacedHunks(many.join('\n'), many.map(line => `${line} changed`).join('\n'))
+    expect(long.hunks.length).toBeGreaterThan(1)
+    const placed = unifiedHunks('first\nsecond\n', 'first!\nsecond\n').hunks
+    const blocks = blocksOf([...unplacedHunks('old', 'new').hunks, ...long.hunks, ...placed])
+    expect(blocks.map(block => [block.gap, block.lines.length])).toEqual([
+      [{ kind: 'gap', count: 0, from: 0 }, 2],
+      [{ kind: 'gap', count: 0, from: 0 }, 500],
+      [{ kind: 'gap', count: 0, from: 1 }, 3],
+    ])
+    // The long one's lines are paired across the cut it is stored with.
+    const rows = rowsOf(long.hunks)
+    const removed = rows.filter(row => row.kind === 'removed')
+    const added = rows.filter(row => row.kind === 'added')
+    expect(removed[200]).toMatchObject({ spans: [{ text: 'value 200', isChanged: false }] })
+    expect(added[200]).toMatchObject({ spans: [{ text: 'value 200', isChanged: false }, { text: ' changed', isChanged: true }] })
+    expect(removed[200]).not.toHaveProperty('old')
+  })
+
+  test("another edit's hunk, higher in the file than the last, starts over under a gap row", () => {
+    const file = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join('\n') + '\n'
+    const low = unifiedHunks(file, file.replace('line 50\n', 'line fifty\n')).hunks
+    const high = unifiedHunks(file, file.replace('line 10\n', 'line ten\n')).hunks
+    const blocks = blocksOf([...low, ...high])
+    expect(blocks.map(block => block.gap)).toEqual([
+      { kind: 'gap', count: 46, from: 1 },
+      { kind: 'gap', count: 6, from: 1 },
+    ])
   })
 
   test('lines that share little are not marked word by word', () => {

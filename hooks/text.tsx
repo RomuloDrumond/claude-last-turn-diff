@@ -17,17 +17,18 @@
 // theme. A changed word keeps the text's own colour on its mark, where a
 // syntax colour is hard to read in the dark theme. Each row comes with what
 // it costs against the pane's bounds, measured on the elements it built
-// (size.ts). Pure, so tests read it directly.
+// (size.ts). The same rows draw the same elements, so tests read it
+// directly; it keeps how each line it styled is drawn (`styled`).
 
 import type { BoxProps, Color, Elements, RenderElement, RenderSurface } from 'claude-code'
 
 import { isCutLine } from './diff'
 import { TINT, gapText, runsOf } from './rows'
-import type { Gap, Line, LineKind, Row, Run, SplitRow } from './rows'
+import type { Gap, Line, LineKind, Row, Run, Span, SplitRow } from './rows'
 import { NOTHING, plus, sizeOf } from './size'
 import type { Size } from './size'
 import { languageOf } from './syntax'
-import type { TokenClass } from './syntax'
+import type { Language, TokenClass } from './syntax'
 
 type Kit = Pick<Elements['desktop'], 'Box' | 'Text' | 'Button'>
 
@@ -134,6 +135,32 @@ function oneMark(runs: readonly Run[], word: Color | undefined): Stretch[] {
 
 const tintOf = (kind: LineKind) => (kind === 'context' ? undefined : TINT[kind])
 
+// The nodes a line's code takes drawn as these stretches: its Text, each
+// stretch's string, and a Text around each one that is coloured or marked.
+const nodesOf = (stretches: readonly Stretch[]) =>
+  stretches.reduce((sum, { color, background }) => sum + (color === undefined && background === undefined ? 1 : 2), 1)
+
+// How each line styled so far is drawn, for as long as the line is held: the
+// pane keeps a file's lines between drawings (view.tsx), so a redraw reads no
+// line's syntax twice. A line whose words were marked since has other spans
+// and is styled again.
+const styled = new WeakMap<Line, { spans: readonly Span[]; language: Language | undefined; stretches: Stretch[] }>()
+
+// A line's code as the stretches it is drawn in, none for a blank line: in
+// its syntax colours with its changed words marked; past MAX_CODE_NODES
+// without the colours; past it still, with one mark over all its changes.
+function stretchesFor(line: Line, language: Language | undefined): Stretch[] {
+  const was = styled.get(line)
+  if (was !== undefined && was.spans === line.spans && was.language === language) return was.stretches
+  const runs = runsOf(line, language, text => text.replace(CONTROL, '\ufffd'))
+  const word = tintOf(line.kind)?.word
+  let stretches = runs.length === 0 ? [] : stretchesOf(runs, word, true)
+  if (nodesOf(stretches) > MAX_CODE_NODES) stretches = stretchesOf(runs, word, false)
+  if (nodesOf(stretches) > MAX_CODE_NODES) stretches = oneMark(runs, word)
+  styled.set(line, { spans: line.spans, language, stretches })
+  return stretches
+}
+
 const pad = (n: number | undefined, digits: number) => (n === undefined ? '' : String(n)).padStart(digits, FIGURE)
 
 // The line numbers and sign a gutter button shows, each number as wide as
@@ -160,12 +187,11 @@ export function textLines(ui: Kit, options: TextOptions) {
 
   // A line's code as one monospaced Text.
   function code(line: Line): RenderElement {
-    const runs = runsOf(line, language, text => text.replace(CONTROL, '�'))
+    const stretches = stretchesFor(line, language)
     // A blank line is a wrapping Text holding a newline: one row high, and a
     // copy keeps it as an empty line, which a cut Text would drop.
-    if (runs.length === 0) return <ui.Text mono>{'\n'}</ui.Text>
-    const word = tintOf(line.kind)?.word
-    const draw = (stretches: Stretch[]) => (
+    if (stretches.length === 0) return <ui.Text mono>{'\n'}</ui.Text>
+    return (
       <ui.Text mono {...(isCut ? { wrap: 'truncate-end' as const } : {})}>
         {stretches.map(({ text, color, background }) =>
           color === undefined && background === undefined ? (
@@ -178,10 +204,6 @@ export function textLines(ui: Kit, options: TextOptions) {
         )}
       </ui.Text>
     )
-    let element = draw(stretchesOf(runs, word, true))
-    if (sizeOf(element).nodes > MAX_CODE_NODES) element = draw(stretchesOf(runs, word, false))
-    if (sizeOf(element).nodes > MAX_CODE_NODES) element = draw(oneMark(runs, word))
-    return element
   }
 
   // The button that shows a line's numbers and copies the line as the file
@@ -190,7 +212,9 @@ export function textLines(ui: Kit, options: TextOptions) {
     const text = line.spans.map(span => span.text).join('')
     const isPartial = isCutLine(text)
     const kept = isPartial ? text.slice(0, -1) : text
-    const what = isPartial ? `the first ${kept.length} characters of line ${number}` : `line ${number}`
+    // A line of a hunk with no place in the file has no number.
+    const name = number > 0 ? `line ${number}` : 'the line'
+    const what = isPartial ? `the first ${kept.length} characters of ${name}` : name
     return (
       <ui.Button
         key={key}
