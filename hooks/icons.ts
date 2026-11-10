@@ -8,7 +8,7 @@
 export type Icon = { source: string; width: number; height: number }
 
 // Squares in a diffstat, as GitHub draws five.
-export const SQUARES = 5
+const SQUARES = 5
 const SQUARE_PX = 8
 const SQUARE_GAP_PX = 2
 
@@ -50,6 +50,10 @@ export function squaresOf(added: number, removed: number): { added: number; remo
   const green = total === 0 ? 0 : Math.round((filled * added) / total)
   return { added: green, removed: filled - green, none: SQUARES - filled }
 }
+
+// What a diffstat's squares say, for a reader that cannot see them.
+export const diffstatAlt = (counts: { added: number; removed: number }) =>
+  `${counts.added} ${counts.added === 1 ? 'line' : 'lines'} added, ${counts.removed} removed`
 
 // The five squares, green for added, red for removed, grey for the rest.
 export function diffstat(added: number, removed: number): Icon {

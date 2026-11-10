@@ -1,4 +1,4 @@
-// A small line-at-a-time highlighter for the diff picture: keywords,
+// A small line-at-a-time highlighter for the diff's lines: keywords,
 // strings, comments, numbers and constants, function and type names. It
 // knows a handful of language families by file extension and reads each
 // line on its own, so a string or comment spanning lines is only guessed.
@@ -14,6 +14,8 @@ export type Language = {
   blockComment?: readonly [string, string]
   quotes: string
   isCaseBlind?: boolean
+  // Names hold hyphens (`font-face`, `margin-left`), as CSS writes them.
+  isHyphenated?: boolean
 }
 
 const words = (text: string): ReadonlySet<string> => new Set(text.split(/\s+/).filter(Boolean))
@@ -76,6 +78,7 @@ const CSS: Language = {
   lineComments: [],
   blockComment: ['/*', '*/'],
   quotes: `'"`,
+  isHyphenated: true,
 }
 
 const SQL: Language = {
@@ -108,7 +111,7 @@ const BY_NAME: Record<string, Language> = {
 }
 
 export function languageOf(path: string): Language | undefined {
-  const name = path.slice(path.lastIndexOf('/') + 1).replace(/#.*$/, '')
+  const name = path.slice(path.lastIndexOf('/') + 1)
   const byName = BY_NAME[name]
   if (byName !== undefined) return byName
   const dot = name.lastIndexOf('.')
@@ -160,7 +163,7 @@ export function tokensOf(text: string, language: Language | undefined): Token[] 
     }
     if (isWordStart(ch)) {
       let to = at + 1
-      while (to < text.length && isWord(text[to]!)) to++
+      while (to < text.length && (isWord(text[to]!) || (language.isHyphenated === true && text[to] === '-'))) to++
       const word = text.slice(at, to)
       const key = language.isCaseBlind ? word.toLowerCase() : word
       let next = to

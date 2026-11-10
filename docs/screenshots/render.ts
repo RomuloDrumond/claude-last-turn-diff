@@ -194,7 +194,7 @@ const ICON = {
 }
 
 // The pane at `columns` columns of Desktop's 13px code face, 7.8px each.
-export function desktopPage(tree: El, theme: 'dark' | 'light', columns: number, maxHeight?: number) {
+export function desktopPage(tree: El, theme: 'dark' | 'light', columns: number) {
   const width = Math.round(columns * 7.8)
   return `<!doctype html><html><head><meta charset="utf-8"><style>
 :root{${THEMES[theme]};${FACES};color-scheme:${theme}}
@@ -204,12 +204,11 @@ body{margin:0;background:transparent;font:13px/19px var(--sans);color:var(--text
 .frame{width:${width + 24}px;background:var(--pane);border:1px solid var(--border);border-radius:14px;box-shadow:var(--shadow);overflow:hidden;position:relative}
 .bar{display:flex;align-items:center;justify-content:space-between;padding:12px 16px 4px 12px;color:var(--secondary);font-size:14px}
 .bar .icons{display:flex;gap:16px}
-.body{padding:12px;${maxHeight ? `max-height:${maxHeight}px;overflow:hidden;` : ''}}
-.fade{position:absolute;left:0;right:0;bottom:0;height:120px;background:linear-gradient(to bottom,transparent,var(--pane))}
+.body{padding:12px}
 ${ENGINE_CSS}
 </style></head><body><div class="stage"><div class="frame">
 <div class="bar"><span>Last turn diff</span><span class="icons">${ICON.expand}${ICON.close}</span></div>
-<div class="body engine">${desktop(tree)}</div>${maxHeight ? '<div class="fade"></div>' : ''}
+<div class="body engine">${desktop(tree)}</div>
 </div></div></body></html>`
 }
 
@@ -230,7 +229,7 @@ ${ENGINE_CSS}
 </div></div></body></html>`
 }
 
-export function terminalPage(tree: El, columns: number, maxHeight?: number) {
+export function terminalPage(tree: El, columns: number) {
   return `<!doctype html><html><head><style>
 :root{--diffAdded:rgb(34,92,43);--diffRemoved:rgb(122,41,54);--diffAddedWord:rgb(56,166,96);--diffRemovedWord:rgb(179,89,107);--diffAddedDimmed:rgb(71,88,74);--diffRemovedDimmed:rgb(105,72,77)}
 *{box-sizing:border-box}
@@ -240,14 +239,13 @@ body{margin:0;background:transparent;-webkit-font-smoothing:antialiased}
 .chrome{height:34px;display:flex;align-items:center;gap:8px;padding:0 14px;background:#2a2a2a;border-bottom:1px solid #111}
 .chrome i{width:12px;height:12px;border-radius:50%;display:block}
 .chrome span{flex:1;text-align:center;color:#999;font:13px -apple-system,system-ui;margin-right:52px}
-.screen{padding:14px 16px;width:calc(${columns}ch + 32px);font:13px/1.4 "SF Mono",Menlo,monospace;color:#e6e6e6;white-space:pre;${maxHeight ? `max-height:${maxHeight}px;overflow:hidden;` : ''}}
-.fade{position:absolute;left:0;right:0;bottom:0;height:100px;background:linear-gradient(to bottom,transparent,#1a1a1a)}
+.screen{padding:14px 16px;width:calc(${columns}ch + 32px);font:13px/1.4 "SF Mono",Menlo,monospace;color:#e6e6e6;white-space:pre}
 .b{font-weight:700}.dim{color:#8a8a8a}.success{color:rgb(78,186,101)}.error{color:rgb(255,107,128)}
 .trunc{overflow:hidden;text-overflow:ellipsis}
 .tcard{border:1px solid #555;border-radius:8px;padding:0 1ch}
 .tbtn{color:#e6e6e6}
 </style></head><body><div class="stage"><div class="frame">
 <div class="chrome"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span>claude — ~/work</span></div>
-<div class="screen">${terminal(tree)}</div>${maxHeight ? '<div class="fade"></div>' : ''}
+<div class="screen">${terminal(tree)}</div>
 </div></div></body></html>`
 }

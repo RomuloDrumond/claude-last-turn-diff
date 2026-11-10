@@ -1,8 +1,9 @@
 import type { SessionMessage } from 'claude-code'
 
 import type { FileDiff, TurnDiff } from '../types'
-import { patchHunks, unifiedHunks } from './diff'
+import { patchHunks, unifiedHunks, unplacedHunks } from './diff'
 import type { Hunks } from './diff'
+import { plural } from './rows'
 
 export const EDIT_TOOLS: ReadonlySet<string> = new Set(['Edit', 'Write', 'NotebookEdit'])
 
@@ -14,10 +15,13 @@ const MAX_FILE_CHARS = 150_000
 const MAX_TURN_CHARS = 600_000
 const TITLE_WORDS = 8
 const TITLE_CHARS = 60
+// How many agents' conversations one reading of the transcript reads back.
+const MAX_AGENTS_READ = 40
 
 // One landed edit: the text before and after it. `before` is null for a file
 // the edit created and undefined when unknown; `patch` is what the tool itself
-// reported, used when a text is missing.
+// reported, or an Edit's own change with no place in the file, used when a
+// text is missing.
 export type Step = {
   key: string
   path: string
@@ -35,7 +39,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 const str = (value: unknown): string | undefined =>
   typeof value === 'string' ? value : undefined
 
-function patchOf(value: unknown): Hunks | undefined {
+// The hunks a tool reported in its result's `structuredPatch`, if it holds
+// any that read as hunks.
+function reportedHunks(value: unknown): Hunks | undefined {
   if (!Array.isArray(value) || value.length === 0) return undefined
   const parts = value.filter(
     (part): part is Patch[number] =>
@@ -93,7 +99,7 @@ export function stepOf(
 
   const path = str(out.filePath) ?? str(input.file_path)
   if (path === undefined) return null
-  const patch = patchOf(out.structuredPatch)
+  const patch = reportedHunks(out.structuredPatch)
 
   if (tool === 'Write') {
     const before =
@@ -114,13 +120,14 @@ export function stepOf(
     const after =
       read.after ??
       (typeof before === 'string' ? replaced(before, oldString, newString, all) : undefined)
-    return { key: path, path, before, after, patch }
+    const isKnown = before !== undefined && after !== undefined
+    return { key: path, path, before, after, patch: patch ?? (isKnown ? undefined : unplacedHunks(oldString, newString)) }
   }
 
   return null
 }
 
-export function displayName(path: string, cwd: string): string {
+function displayName(path: string, cwd: string): string {
   const root = cwd.endsWith('/') ? cwd : `${cwd}/`
   return cwd !== '' && path.startsWith(root) ? path.slice(root.length) : path
 }
@@ -209,7 +216,7 @@ function fileOf(steps: Step[], cwd: string): FileDiff | null {
     else return null
   }
   const kept = keepUpTo(hunks, MAX_FILE_CHARS)
-  if (kept.dropped > 0) note = `${kept.dropped} more hunks not kept`
+  if (kept.dropped > 0) note = `${plural(kept.dropped, 'more hunk')} not kept`
   return {
     key: first.key,
     name,
@@ -254,24 +261,106 @@ const isPromptRow = (message: SessionMessage) =>
   (message.toolResults === undefined || message.toolResults.length === 0) &&
   message.text !== ''
 
+type ToolUse = SessionMessage['toolUses'][number]
+
+// Reads one of the session's agents' own conversation; nothing when the
+// session cannot read it back.
+export type AgentReader = (agentId: string) => Promise<readonly SessionMessage[] | undefined>
+
+// What a Write says to the model when it made the file.
+const CREATED = /^File created successfully/
+
+// The agent an Agent call started. The main conversation names it on the
+// call; an agent's own conversation only in what the call answered.
+const agentOf = (use: ToolUse) =>
+  use.tool === 'Agent' ? (use.agentId ?? /^agentId: ([\w-]+)/m.exec(use.text ?? '')?.[1]) : undefined
+
+// The answered edit calls of a conversation's rows, in order, each agent's
+// in the place of the Agent call that started it. `read` counts the agents
+// read, up to MAX_AGENTS_READ.
+async function editsIn(
+  rows: readonly SessionMessage[],
+  agentRows: AgentReader | undefined,
+  read: Set<string>,
+): Promise<ToolUse[]> {
+  const edits: ToolUse[] = []
+  for (const row of rows) {
+    if (row.role !== 'assistant') continue
+    for (const use of row.toolUses) {
+      if (EDIT_TOOLS.has(use.tool)) {
+        if (use.isError !== true && (use.result !== undefined || use.text !== undefined)) edits.push(use)
+        continue
+      }
+      const agentId = agentOf(use)
+      if (agentId === undefined || agentRows === undefined || read.has(agentId) || read.size >= MAX_AGENTS_READ) continue
+      read.add(agentId)
+      const theirs = await agentRows(agentId)
+      if (theirs !== undefined) edits.push(...(await editsIn(theirs, agentRows, read)))
+    }
+  }
+  return edits
+}
+
+// A turn's edit calls as steps. An agent's conversation stores no record of
+// a call, only what the model gave it and read back: such a step takes its
+// file's text from the step before it on the same file, when that one left
+// it known, and a Write that says it made the file starts from none.
+//
+// A background agent's calls stand where its Agent call does, though they
+// may have landed after the main loop's later ones. A recorded step that
+// starts from another text than the steps before it left shows that they did:
+// those steps then keep only what their calls say, with no place in the file.
+function stepsOf(edits: readonly ToolUse[]): Step[] {
+  const texts = new Map<string, string>()
+  const steps: Step[] = []
+  // Per file, where the steps that took their text from the step before
+  // stand in `steps`, and their calls, since the file's last recorded step.
+  const taken = new Map<string, { at: number; use: ToolUse }[]>()
+  for (const use of edits) {
+    const path = str(use.input.file_path)
+    const isRecorded = use.result !== undefined
+    const before =
+      isRecorded || path === undefined
+        ? undefined
+        : use.tool === 'Write' && CREATED.test(use.text ?? '')
+          ? null
+          : texts.get(path)
+    const step = stepOf(use.tool, use.input, use.result, before !== undefined ? { before } : {})
+    if (step === null) continue
+    const run = taken.get(step.key) ?? []
+    if (isRecorded) {
+      const last = run[run.length - 1]
+      if (last !== undefined && step.before !== undefined && steps[last.at]!.after !== step.before) {
+        for (const one of run) steps[one.at] = stepOf(one.use.tool, one.use.input, undefined) ?? steps[one.at]!
+      }
+      taken.delete(step.key)
+    } else if (typeof before === 'string') {
+      taken.set(step.key, [...run, { at: steps.length, use }])
+    }
+    if (step.after !== undefined) texts.set(step.key, step.after)
+    else texts.delete(step.key)
+    steps.push(step)
+  }
+  return steps
+}
+
 // The session's turns with edits, newest first, read back from the
-// transcript, and how many turns it holds. Edits come from each Edit, Write
-// and NotebookEdit call's stored result; errored calls are left out.
-export function turnsFromMessages(
+// transcript, and how many turns it holds. Edits come from each answered
+// Edit, Write and NotebookEdit call that did not fail, the main loop's and,
+// when `agentRows` reads them, those of the agents each turn started.
+export async function turnsFromMessages(
   messages: readonly SessionMessage[],
   cwd: string,
   keep: number,
-): { turns: TurnDiff[]; count: number } {
+  agentRows?: AgentReader,
+): Promise<{ turns: TurnDiff[]; count: number }> {
   const starts = messages.flatMap((message, at) => (isPromptRow(message) ? [at] : []))
   const turns: TurnDiff[] = []
+  const read = new Set<string>()
 
   for (let at = starts.length - 1; at >= 0 && turns.length < keep; at--) {
     const rows = messages.slice(starts[at], starts[at + 1])
-    const steps = rows
-      .flatMap(row => (row.role === 'assistant' ? row.toolUses : []))
-      .filter(use => EDIT_TOOLS.has(use.tool) && use.isError !== true && use.result !== undefined)
-      .map(use => stepOf(use.tool, use.input, use.result))
-      .filter((step): step is Step => step !== null)
+    const steps = stepsOf(await editsIn(rows, agentRows, read))
     if (steps.length === 0) continue
     const turn = turnOf(at + 1, rows[0]?.text ?? '', steps, cwd)
     if (turn.files.length > 0) turns.push(turn)

@@ -18,7 +18,7 @@ const MAX_HUNK_LINES = 200
 const MAX_LINE_CHARS = 400
 const CUT_MARK = '…'
 
-export function splitLines(text: string): string[] {
+function splitLines(text: string): string[] {
   if (text === '') return []
   const lines = text.split('\n')
   if (lines[lines.length - 1] === '') lines.pop()
@@ -128,8 +128,10 @@ function cut(line: string): string {
 export const isCutLine = (line: string) => line.length >= MAX_LINE_CHARS && line.endsWith(CUT_MARK)
 
 // Hunk texts (header and body, no trailing newline) for the change from
-// `before` to `after`, with CONTEXT lines around each change.
-export function unifiedHunks(before: string, after: string): Hunks {
+// `before` to `after`, with CONTEXT lines around each change. `headOf`
+// writes a hunk's header: `isContinued` for a part after the first of a
+// hunk cut at MAX_HUNK_LINES.
+function hunksWith(before: string, after: string, headOf: (ops: Numbered[], isContinued: boolean) => string): Hunks {
   const ops = diffLines(splitLines(before), splitLines(after))
   let o = 1
   let n = 1
@@ -159,11 +161,13 @@ export function unifiedHunks(before: string, after: string): Hunks {
     const rows = numbered.slice(start, end + 1)
     for (let at = 0; at < rows.length; at += MAX_HUNK_LINES) {
       const part = rows.slice(at, at + MAX_HUNK_LINES)
-      hunks.push([header(part), ...part.map(op => op.t + cut(op.line))].join('\n'))
+      hunks.push([headOf(part, at > 0), ...part.map(op => op.t + cut(op.line))].join('\n'))
     }
   }
   return { hunks, added, removed }
 }
+
+export const unifiedHunks = (before: string, after: string): Hunks => hunksWith(before, after, header)
 
 // Hunks a tool already computed (Edit's and Write's `structuredPatch`), as
 // hunk texts with the same caps.
@@ -184,9 +188,19 @@ export function patchHunks(
   return { hunks, added, removed }
 }
 
+// What heads a hunk whose place in the file is not known, and a part after
+// the first of one cut at MAX_HUNK_LINES.
+export const UNPLACED = '@@ -?,? +?,? @@'
+export const UNPLACED_ON = `${UNPLACED} …`
+
+// The change from `before` to `after`, two stretches of a file read without
+// the file around them, as hunks that name no line.
+export const unplacedHunks = (before: string, after: string): Hunks =>
+  hunksWith(before, after, (_, isContinued) => (isContinued ? UNPLACED_ON : UNPLACED))
+
 // Hunk texts as a unified diff of the file named `name`, as git writes one;
 // an absolute name keeps no a/ or b/ prefix.
-export function patchOf(name: string, isNew: boolean, hunks: readonly string[]): string {
+export function unifiedDiff(name: string, isNew: boolean, hunks: readonly string[]): string {
   const side = (prefix: string) => (name.startsWith('/') ? name : prefix + name)
   return [isNew ? '--- /dev/null' : `--- ${side('a/')}`, `+++ ${side('b/')}`, ...hunks, ''].join('\n')
 }
